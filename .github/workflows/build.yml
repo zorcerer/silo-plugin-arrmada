@@ -1,0 +1,60 @@
+# Checks, tests and builds the plugin on every push and pull request, and
+# keeps the three binaries as an artifact of the run.
+#
+# `release.yml` calls this with the version of a tag, and attaches what it
+# builds to the release.
+name: build
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_call:
+    inputs:
+      version:
+        description: The version the manifest carries, without the v.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version || 'dev' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ inputs.version || '0.0.0-dev' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Format and vet
+        run: make vet
+
+      - name: Test
+        run: make test e2e
+
+      - name: Build
+        run: make build-all
+
+      - name: Check the manifest
+        run: |
+          make build
+          ./plugin manifest | jq -e --arg version "$VERSION" '.version == $version'
+          ./plugin manifest | jq -e '.capabilities[0].type == "scan_source.v1"'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin
+          path: dist/
+          if-no-files-found: error

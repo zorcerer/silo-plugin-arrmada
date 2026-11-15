@@ -1,0 +1,323 @@
+package arrmada
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// fakeArrmada serves the three endpoints the plugin reads, from in-memory
+// history (newest first, per kind) and library detail.
+type fakeArrmada struct {
+	mu      sync.Mutex
+	key     string
+	history map[string][]historyEvent
+	movies  map[int64]any
+	series  map[int64]any
+	// requests records each path and query, for asserting what was read.
+	requests []string
+}
+
+func newFake() *fakeArrmada {
+	return &fakeArrmada{
+		key:     "arrk_test",
+		history: map[string][]historyEvent{},
+		movies:  map[int64]any{},
+		series:  map[int64]any{},
+	}
+}
+
+func (f *fakeArrmada) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, r.URL.RequestURI())
+	if r.Header.Get("X-Api-Key") != f.key {
+		http.Error(w, `{"error":"not signed in"}`, http.StatusUnauthorized)
+		return
+	}
+	switch {
+	case r.URL.Path == "/api/v1/history":
+		q := r.URL.Query()
+		if q.Get("event") != watchedEvents {
+			http.Error(w, "unexpected event filter "+q.Get("event"), http.StatusBadRequest)
+			return
+		}
+		limit, _ := strconv.Atoi(q.Get("limit"))
+		events := f.history[q.Get("kind")]
+		start := 0
+		if b := q.Get("before"); b != "" {
+			id, _ := strconv.ParseInt(b, 10, 64)
+			for start < len(events) && events[start].ID >= id {
+				start++
+			}
+		}
+		end := min(start+limit, len(events))
+		page := historyPage{Events: append([]historyEvent{}, events[start:end]...)}
+		if end-start == limit && end < len(events) {
+			// Arrmada's cursor is <at_ms>:<kind>:<id>; the plugin treats it
+			// as opaque, so the fake uses the id alone.
+			page.NextBefore = strconv.FormatInt(events[end-1].ID, 10)
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	case strings.HasPrefix(r.URL.Path, "/api/v1/movies/"):
+		f.item(w, f.movies, strings.TrimPrefix(r.URL.Path, "/api/v1/movies/"))
+	case strings.HasPrefix(r.URL.Path, "/api/v1/series/"):
+		f.item(w, f.series, strings.TrimPrefix(r.URL.Path, "/api/v1/series/"))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (f *fakeArrmada) item(w http.ResponseWriter, items map[int64]any, idText string) {
+	id, _ := strconv.ParseInt(idText, 10, 64)
+	v, ok := items[id]
+	if !ok {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// add puts an event at the head of kind's history.
+func (f *fakeArrmada) add(kind string, id, item int64, event string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.history[kind] = append([]historyEvent{{Kind: kind, ID: id, ItemID: item, Event: event}}, f.history[kind]...)
+}
+
+func movie(paths ...string) map[string]any {
+	m := map[string]any{}
+	if len(paths) > 0 {
+		m["movie_file_path"] = paths[0]
+		m["file"] = map[string]any{"path": paths[0]}
+	}
+	var versions []map[string]any
+	for _, p := range paths {
+		versions = append(versions, map[string]any{"file_path": p, "file": map[string]any{"path": p}})
+	}
+	m["versions"] = versions
+	return m
+}
+
+func show(seasons ...[]string) map[string]any {
+	var out []map[string]any
+	for _, files := range seasons {
+		var eps []map[string]any
+		for _, f := range files {
+			eps = append(eps, map[string]any{"file_path": f})
+		}
+		out = append(out, map[string]any{"episodes": eps})
+	}
+	return map[string]any{"seasons": out}
+}
+
+func poll(t *testing.T, f *fakeArrmada, m Marker, have bool) ([]Change, Marker) {
+	t.Helper()
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	changes, next, err := Poll(context.Background(), srv.URL+"/", f.key, m, have, srv.Client())
+	if err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+	return changes, next
+}
+
+func TestFirstPollStartsAtNewestEventAndReportsNothing(t *testing.T) {
+	f := newFake()
+	f.add(kindMovie, 1, 10, "imported")
+	f.add(kindMovie, 2, 11, "imported")
+	f.add(kindSeries, 5, 20, "imported")
+	f.movies[10] = movie("/media/movies/A (2001)/A.mkv")
+
+	changes, next := poll(t, f, Marker{}, false)
+	if len(changes) != 0 {
+		t.Fatalf("first poll returned %v", changes)
+	}
+	if next != (Marker{Movie: 2, Series: 5}) {
+		t.Fatalf("next = %+v", next)
+	}
+	for _, r := range f.requests {
+		if !strings.Contains(r, "limit=1") {
+			t.Errorf("first poll read more than the newest event: %s", r)
+		}
+	}
+}
+
+func TestPollReportsOnlyEventsAfterTheMarker(t *testing.T) {
+	f := newFake()
+	f.add(kindMovie, 1, 10, "imported")
+	f.add(kindMovie, 2, 11, "imported")
+	f.add(kindMovie, 3, 11, "renamed")
+	f.add(kindMovie, 4, 12, "deleted")
+	f.movies[10] = movie("/media/movies/Old (1999)/Old.mkv")
+	f.movies[11] = movie("/media/movies/New (2024)/New.mkv", "/media/movies/New (2024)/New - 4K.mkv")
+	f.movies[12] = movie() // its only file was deleted
+
+	changes, next := poll(t, f, Marker{Movie: 1}, true)
+	want := []Change{
+		{Path: "/media/movies/New (2024)/New - 4K.mkv", Scope: ScopeFile},
+		{Path: "/media/movies/New (2024)/New.mkv", Scope: ScopeFile},
+	}
+	if !reflect.DeepEqual(changes, want) {
+		t.Fatalf("changes = %v, want %v", changes, want)
+	}
+	if next != (Marker{Movie: 4}) {
+		t.Fatalf("next = %+v", next)
+	}
+}
+
+func TestPollIsRepeatable(t *testing.T) {
+	f := newFake()
+	f.add(kindSeries, 8, 30, "imported")
+	f.series[30] = show([]string{"/tv/Show/Season 01/S01E01.mkv"}, []string{"/tv/Show/Season 02/S02E01.mkv"})
+
+	a, nextA := poll(t, f, Marker{Series: 7}, true)
+	b, nextB := poll(t, f, Marker{Series: 7}, true)
+	if !reflect.DeepEqual(a, b) || nextA != nextB {
+		t.Fatalf("two polls of one window differ: %v %+v / %v %+v", a, nextA, b, nextB)
+	}
+	c, _ := poll(t, f, nextA, true)
+	if len(c) != 0 {
+		t.Fatalf("poll after the window returned %v", c)
+	}
+}
+
+func TestPollPagesUntilTheMarker(t *testing.T) {
+	f := newFake()
+	for id := int64(1); id <= 450; id++ {
+		f.add(kindMovie, id, id, "imported")
+		f.movies[id] = movie(fmt.Sprintf("/m/%d/f.mkv", id))
+	}
+	changes, next := poll(t, f, Marker{Movie: 30}, true)
+	if len(changes) != 420 || next.Movie != 450 {
+		t.Fatalf("got %d changes, next %+v; want 420 and 450", len(changes), next)
+	}
+}
+
+func TestPollSkipsTitlesRemovedFromArrmada(t *testing.T) {
+	f := newFake()
+	f.add(kindMovie, 2, 99, "deleted")
+	f.add(kindSeries, 2, 98, "deleted")
+	changes, next := poll(t, f, Marker{Movie: 1, Series: 1}, true)
+	if len(changes) != 0 || next != (Marker{Movie: 2, Series: 2}) {
+		t.Fatalf("changes %v next %+v", changes, next)
+	}
+}
+
+func TestPollRestartsWhenIDsGoBackwards(t *testing.T) {
+	f := newFake()
+	f.add(kindMovie, 3, 10, "imported")
+	f.movies[10] = movie("/m/a.mkv")
+	changes, next := poll(t, f, Marker{Movie: 500}, true)
+	if len(changes) != 0 || next.Movie != 3 {
+		t.Fatalf("changes %v next %+v; want none and 3", changes, next)
+	}
+}
+
+func TestPollKeepsMarkerOnError(t *testing.T) {
+	f := newFake()
+	f.add(kindMovie, 2, 10, "imported")
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	m := Marker{Movie: 1}
+	_, next, err := Poll(context.Background(), srv.URL, "wrong", m, true, srv.Client())
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("err = %v, want a 401", err)
+	}
+	if strings.Contains(err.Error(), "wrong") {
+		t.Fatalf("error text carries the key: %v", err)
+	}
+	if next != m {
+		t.Fatalf("next = %+v, want the old marker", next)
+	}
+}
+
+func TestPollNeedsAddressAndKey(t *testing.T) {
+	if _, _, err := Poll(context.Background(), "", "k", Marker{}, true, nil); err == nil {
+		t.Fatal("no address accepted")
+	}
+	if _, _, err := Poll(context.Background(), "http://x", " ", Marker{}, true, nil); err == nil {
+		t.Fatal("no key accepted")
+	}
+}
+
+func TestSeriesChanges(t *testing.T) {
+	cases := []struct {
+		name string
+		show map[string]any
+		want []Change
+	}{
+		{
+			name: "season folders scan the show folder",
+			show: show([]string{"/tv/Show/Season 01/a.mkv"}, []string{"/tv/Show/Season 02/b.mkv"}),
+			want: []Change{{Path: "/tv/Show", Scope: ScopeSubtree}},
+		},
+		{
+			name: "one season folder scans that folder",
+			show: show([]string{"/tv/Show/Season 01/a.mkv", "/tv/Show/Season 01/b.mkv"}),
+			want: []Change{{Path: "/tv/Show/Season 01", Scope: ScopeSubtree}},
+		},
+		{
+			name: "files in the show folder and a season folder",
+			show: show([]string{"/tv/Show/a.mkv"}, []string{"/tv/Show/Season 02/b.mkv"}),
+			want: []Change{{Path: "/tv/Show", Scope: ScopeSubtree}},
+		},
+		{
+			name: "misplaced files are scanned folder by folder, not from the TV root",
+			show: show([]string{"/tv/Show/Season 01/a.mkv"}, []string{"/tv/Other/Season 02/b.mkv"}),
+			want: []Change{
+				{Path: "/tv/Other/Season 02", Scope: ScopeSubtree},
+				{Path: "/tv/Show/Season 01", Scope: ScopeSubtree},
+			},
+		},
+		{
+			name: "windows paths",
+			show: show([]string{`D:\TV\Show\Season 01\a.mkv`}, []string{`D:\TV\Show\Season 02\b.mkv`}),
+			want: []Change{{Path: `D:\TV\Show`, Scope: ScopeSubtree}},
+		},
+		{
+			name: "no files",
+			show: show([]string{""}),
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, _ := json.Marshal(tc.show)
+			var s seriesDetail
+			if err := json.Unmarshal(raw, &s); err != nil {
+				t.Fatal(err)
+			}
+			got := seriesChanges(s)
+			if len(got) > 1 {
+				got = dedupe(got)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommonDir(t *testing.T) {
+	cases := [][3]string{
+		{"/a/b/c", "/a/b/d", "/a/b"},
+		{"/a/b", "/a/b/c", "/a/b"},
+		{"/a/bc", "/a/b", "/a"},
+		{"/a", "/b", "/"},
+		{`C:\x\y`, `C:\x\z`, `C:\x`},
+		{`C:\x`, `D:\x`, ""},
+	}
+	for _, c := range cases {
+		if got := commonDir(c[0], c[1]); got != c[2] {
+			t.Errorf("commonDir(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}
