@@ -2,7 +2,8 @@
 
 BINARY = plugin
 PLATFORMS = linux/amd64 linux/arm64 darwin/arm64
-VERSION ?= $(shell git describe --tags --always 2>/dev/null | sed 's/^v//')
+# manifest.json's version, which a release tag must match.
+VERSION ?= $(shell jq -r .version manifest.json)
 LDFLAGS = -s -w -X main.version=$(VERSION)
 
 build:
