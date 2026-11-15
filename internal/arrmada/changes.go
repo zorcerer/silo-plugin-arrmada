@@ -356,12 +356,35 @@ func within(p, dir string) bool {
 	return strings.HasPrefix(p, dir+"/") || strings.HasPrefix(p, dir+`\`)
 }
 
+// reportable keeps a path Silo can resolve: absolute (/..., C:\..., or
+// \\server\...), with no control characters. Anything else would only fail
+// to match a library folder; dropping it here keeps an odd answer from
+// Arrmada out of Silo's scan queue.
+func reportable(p string) bool {
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	switch {
+	case strings.HasPrefix(p, "/"), strings.HasPrefix(p, `\\`):
+		return true
+	case len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/'):
+		c := p[0] | 0x20
+		return 'a' <= c && c <= 'z'
+	}
+	return false
+}
+
 // dedupe drops repeated changes and sorts the rest, so two polls of the same
 // window return the same list.
 func dedupe(in []Change) []Change {
 	seen := map[Change]bool{}
 	out := make([]Change, 0, len(in))
 	for _, c := range in {
+		if !reportable(c.Path) {
+			continue
+		}
 		if !strings.Contains(c.Path, `\`) {
 			c.Path = path.Clean(c.Path)
 		}
