@@ -21,7 +21,7 @@ import (
 )
 
 func TestPollChangesOverGRPC(t *testing.T) {
-	const apiKey = "arrk_e2e"
+	const apiKey = "arrk_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
 	const account = "silo:pw"
 	const file = "/media/movies/Film (2020)/Film (2020).mkv"
 
