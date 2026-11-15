@@ -36,12 +36,17 @@ Arrmada 0.3.1 or later, the first release with personal API keys.
 
 ### Tested on a real server
 
-On Silo `build-2249` with Arrmada 0.4.0, the maintainer has tested, with
-plugin v0.1.1: the request server's connection test, and creating requests
-from Silo, a series among them. Everything else (season-scoped requests from
-v0.2.0, approval, 4K, download progress, the error messages, and Autoscan)
-has so far been run only by the test suite, against stand-ins for Silo and
-Arrmada built from their source.
+On Silo `build-2249` with Arrmada 0.4.0, the maintainer has tested:
+
+- Requests, with plugin v0.1.1: the request server's connection test, and
+  creating requests from Silo, a series among them.
+- Autoscan, with a v0.2 release: signing in with an email and password
+  account, and the source polling without errors.
+
+Everything else (season-scoped requests from v0.2.0, approval, 4K, download
+progress, the error messages, and an import in Arrmada reaching Silo's
+library) has so far been run only by the test suite, against stand-ins for
+Silo and Arrmada built from their source.
 
 A Silo server running in Docker reaches Arrmada by its container name on a
 shared Docker network (`http://Arrmada:7878`). A reverse proxy in front of
@@ -125,17 +130,34 @@ The quality profile is a text field: Arrmada's keys cannot list its profiles.
 
 ### Setup
 
-1. In Arrmada, use a manager or admin account **without two-factor sign-in**.
-   A dedicated account (say `silo`) keeps its session apart from yours.
-2. In Silo, under Admin, Libraries, Autoscan, add a connection with Arrmada's
-   address, and `username:password` in the API key field (Silo stores it
-   encrypted). The value is split at the first colon, so the password may hold
-   one. Silo's form offers the Sonarr and Radarr types only; pick either, it is
-   a label. Test connection calls the Sonarr API and fails against Arrmada.
-3. Add a source, choose **Arrmada**, and bind the connection.
-4. When Arrmada and Silo mount the media at different paths (Arrmada's
-   `/media/movies` is Silo's `/data/movies`, say), add a path rewrite on the
+1. In Arrmada, use a manager or admin account **without two-factor sign-in**,
+   with a password: an account that signs in only with Plex or Jellyfin has
+   none. A dedicated account (say `silo@example.com`) keeps its session apart
+   from yours. A manager account is never made to set up two-factor; an admin
+   is, when "Require two-factor for admins" is on.
+2. In Silo, under Admin, Libraries, Autoscan, add a connection:
+   - **Kind:** Sonarr or Radarr. Silo offers only these; the plugin ignores
+     which.
+   - **Base URL:** Arrmada's address, such as `http://arrmada:7878`.
+   - **API key:** the account's sign-in name, a colon, and its password:
+     `silo@example.com:password`. The sign-in name is what Arrmada's sign-in
+     page asks for: an email address on an Arrmada that signs in by email,
+     otherwise the username. The value is split at the first colon, so the
+     password may hold one. Silo stores it encrypted.
+3. **Ignore Test connection on this form.** Silo runs that test itself
+   against the Sonarr API, not through the plugin, so against Arrmada it
+   always shows "Connection could not be verified. Check its configuration
+   and access." whatever the credentials. Click **Save changes**; the test
+   does not block saving.
+4. Add a source, choose **Arrmada**, and bind the connection.
+5. When Arrmada and Silo mount the media at different paths (Arrmada's
+   `/storage` is Silo's `/mnt/user/data`, say), add a path rewrite on the
    source.
+6. Check it in the source's activity log after the next poll (lower the
+   Autoscan poll interval to see it sooner). The first poll succeeds with 0
+   changes: it only records where Arrmada's history is. A failure shows the
+   plugin's own message: a refused password, two-factor sign-in, an address
+   that is not Arrmada, or an API key in place of an account.
 
 The plugin signs in with `POST /api/v1/auth/login` and keeps the
 `arrmada_session` cookie in memory for the life of the plugin process, so the
