@@ -1,5 +1,14 @@
 # A pushed tag `v1.2.3` builds the plugin with 1.2.3 in its manifest and
-# publishes a release of that name with a binary per platform attached.
+# publishes a release of that name with:
+#
+# - plugin-<os>-<arch>, one binary per platform
+# - checksums.txt, their SHA-256 sums
+# - plugin.sigstore.json, a build provenance attestation of the binaries,
+#   which Silo checks and records for a plugin installed from a repository
+# - index.json, the Silo plugin repository index naming this release
+#
+# Silo's repository URL is
+# https://github.com/zorcerer/silo-plugin-arrmada/releases/latest/download/index.json
 name: release
 
 on:
@@ -30,19 +39,46 @@ jobs:
   publish:
     needs: [version, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
       - uses: actions/download-artifact@v8
         with:
           name: plugin
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum plugin-* > checksums.txt && cat checksums.txt
+
+      - id: attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/plugin-*
+
+      - name: Index
+        run: |
+          cp "${{ steps.attest.outputs.bundle-path }}" dist/plugin.sigstore.json
+          go run ./cmd/index -version "$VERSION" -dist dist -bundle > dist/index.json
+          jq -e '.plugins[0].manifest.version == env.VERSION' dist/index.json
 
       - name: Create the release
         run: |
-          gh release create "$GITHUB_REF_NAME" plugin-* \
+          gh release create "$GITHUB_REF_NAME" dist/plugin-* dist/checksums.txt dist/plugin.sigstore.json dist/index.json \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

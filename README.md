@@ -12,6 +12,23 @@ They take different credentials. Arrmada's personal API keys reach its
 requests routes but not its history or library, so Autoscan signs in with an
 account.
 
+## Install
+
+In Silo, under Admin, Plugins, add a repository with this URL, then install
+**Arrmada** from it:
+
+```
+https://github.com/zorcerer/silo-plugin-arrmada/releases/latest/download/index.json
+```
+
+Every release attaches its own `index.json`, so that URL always names the
+newest release. The binaries carry a build provenance attestation
+(`plugin.sigstore.json`); Silo checks it and records the result, and installs
+either way.
+
+To install by hand instead, upload the `plugin-<os>-<arch>` for the Silo
+server's platform from a release.
+
 ## Requests
 
 ### Setup
@@ -123,8 +140,9 @@ make e2e          # builds the binary and calls it over go-plugin gRPC, as Silo 
 ./plugin manifest # the manifest Silo reads from the binary
 ```
 
-Upload the binary for the Silo server's platform under Admin, Plugins. The
-version in the manifest comes from `git describe`, or `VERSION=1.2.3 make build`.
+The version in the manifest comes from `git describe`, or
+`VERSION=1.2.3 make build`. `go run ./cmd/index -version 1.2.3 -dist dist`
+writes the repository index for binaries in `dist/`.
 
 ## License
 
