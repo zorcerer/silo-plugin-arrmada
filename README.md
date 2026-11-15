@@ -32,8 +32,16 @@ account.
 
 Built against [`silo-plugin-sdk`](https://github.com/Silo-Server/silo-plugin-sdk)
 v0.32.1 and Silo API `v1`, for linux/amd64, linux/arm64 and darwin/arm64.
-Arrmada 0.3.1 or later, the first release with personal API keys. Requests
-have been used with Arrmada 0.4.0 and a Silo `build-2249` server.
+Arrmada 0.3.1 or later, the first release with personal API keys.
+
+### Tested on a real server
+
+On Silo `build-2249` with Arrmada 0.4.0, the maintainer has tested, with
+plugin v0.1.1: the request server's connection test, and creating requests
+from Silo, a series among them. Everything else (season-scoped requests from
+v0.2.0, approval, 4K, download progress, the error messages, and Autoscan)
+has so far been run only by the test suite, against stand-ins for Silo and
+Arrmada built from their source.
 
 A Silo server running in Docker reaches Arrmada by its container name on a
 shared Docker network (`http://Arrmada:7878`). A reverse proxy in front of
@@ -100,8 +108,16 @@ server's platform from a release.
   While a download runs, Silo gets its size, what is left and the expected
   finish, and checks every minute.
 - A title already in Arrmada's library is completed at once. A refusal from
-  Arrmada (a quota, a title it does not take) fails the target with Arrmada's
-  message.
+  Arrmada that will repeat (a quota, a title it does not take, seasons it
+  does not know) fails the target with Arrmada's message. Arrmada
+  unreachable, a 5xx, or a refused key is returned to Silo as an error, so
+  Silo tries the request again later.
+- An approval that fails for a reason that may pass is retried the same way;
+  Arrmada answers the repeated request with the one already made. An
+  approval Arrmada refuses for good (an unknown quality profile) leaves the
+  request pending, with the reason in its message.
+- The plugin does not follow redirects. An address that redirects is
+  reported, with the host it redirects to.
 
 The quality profile is a text field: Arrmada's keys cannot list its profiles.
 
@@ -131,12 +147,20 @@ saying so.
 
 On each poll (600 seconds by default) the plugin:
 
-1. Reads `GET /api/v1/history?kind=movie` and `?kind=series`, filtered to the
-   `imported`, `upgraded`, `renamed` and `deleted` categories, newest first,
-   200 events a page, until it reaches the last event it reported. It reads at
-   most 25 pages (5,000 events) per kind per poll.
-2. Looks up each title those events name:
-   `GET /api/v1/movies/{id}` and `GET /api/v1/series/{id}`.
+1. Reads `GET /api/v1/history?kind=movie` and `?kind=series` with
+   `event=all`, newest first, 200 events a page, until it reaches the last
+   event it reported, at most 25 pages (5,000 events) per kind per poll. Of
+   those it keeps the events that change files: `imported`, `upgraded`,
+   `renamed`, `renumbered`, `deleted`, `file.deleted`, `version_added`,
+   `version_removed`, `moved` (to another library folder) and
+   `files.repaired`. History's own categories file the last three under
+   "other", so the plugin picks them out by name.
+2. Looks up each title those events name, oldest event first:
+   `GET /api/v1/movies/{id}` and `GET /api/v1/series/{id}`. After 2 minutes
+   it stops and returns what it has; the next poll carries on from the first
+   event it did not reach. Silo gives a poll 5 minutes. A lookup that fails in
+   a way that may pass (Arrmada unreachable, a 5xx) also stops the poll there.
+   A title whose answer cannot be read is skipped.
 3. Returns, as Arrmada sees the paths:
    - for a movie, each of its files (every version) as a `FILE` change. Silo
      scans the file's folder, which also picks up a file a rename or upgrade
@@ -149,8 +173,15 @@ On each poll (600 seconds by default) the plugin:
      misplaced), each folder is scanned on its own, so a TV root is never
      scanned whole.
 
-A title removed from Arrmada, or a movie whose last file was deleted, has no
-path left to report. Silo's next full scan of the library marks it missing.
+The plugin reports where a title's files are now, and keeps no record of
+where they were. So:
+
+- a title removed from Arrmada, a movie whose last file was deleted, or a show
+  whose last episode file was deleted has no path left to report;
+- a title moved to another library folder is scanned in its new folder only;
+- a season folder emptied by a delete is not scanned.
+
+Silo's next full scan of the library marks what is gone as missing.
 
 Books, audiobooks and music are not read yet.
 
@@ -190,11 +221,25 @@ how to verify a downloaded binary.
 
 ## AI disclosure
 
-Written with Claude Code (CLI), model `claude-opus-5-5`, which wrote the code,
-tests and documentation. I direct the work and test it on my own Silo and
-Arrmada: Requests have been tested there; Autoscan so far only by the test
-suite. No independent code review has been run yet. Pull requests in this
-repository state the same for their own changes.
+- Harness: Claude Code 2.1.311
+- Tool(s): Claude Code CLI
+- Model(s): `claude-opus-5-5`, as the session reports it; all of the
+  plugin's code was written in that one session
+- Involvement: Fully AI-generated, human verified. The maintainer (zorcerer)
+  directed the work and tested what [Tested on a real server](#tested-on-a-real-server)
+  lists.
+- Adversarial review: two passes with Claude Code's `/code-review` (high
+  effort), one over the disclosure and documentation and one over the Go
+  source against the Silo SDK, Silo server and Arrmada source. They found
+  wrong claims in this section, a release error path that marked temporary
+  failures as permanent, Autoscan polls that could time out on the same
+  window forever, event names it missed, credentials that would follow a
+  redirect to another host, and other services' response bodies shown in
+  error messages. The fixes are in v0.2.2. Not fixed: deleted files leave no
+  path to report (see Autoscan above).
+
+Pull requests from #11 on end with the same disclosure for their own changes;
+`.github/PULL_REQUEST_TEMPLATE.md` carries the fields.
 
 ## License
 
