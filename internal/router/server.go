@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -128,29 +129,46 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	case errors.As(err, &se) && se.Code == 409 && strings.Contains(se.Message, "already in the library"):
 		target.Status, target.Message = "completed", "Already in Arrmada's library"
 		return &pluginv1.FulfillResponse{Targets: []*pluginv1.FulfillmentTarget{target}}, nil
-	case errors.As(err, &se):
-		// Arrmada answered and refused: a quota, a declined title, an adult
-		// title. Asking again will not change that.
+	case refused(err):
+		// Arrmada answered and refused the request itself: a quota, a
+		// declined title, a title it does not take, seasons it does not
+		// know. Asking again will not change that.
 		target.Status, target.Message = "failed", strings.TrimPrefix(se.Message, "arrmada: ")
 		return &pluginv1.FulfillResponse{Targets: []*pluginv1.FulfillmentTarget{target}}, nil
 	case err != nil:
+		// Arrmada down or restarting, the key refused, something else at
+		// the address: an error, so Silo tries the request again later.
 		return nil, err
 	}
 
+	approveNote := ""
 	if created.Status == "pending" && cfg.Approve {
 		// Approval needs a manager or admin key with full access. When it is
 		// refused the request waits in Arrmada for staff, which is reported.
-		if err := api.Approve(ctx, created.ID, profile); err == nil {
+		err := api.Approve(ctx, created.ID, profile)
+		switch {
+		case err == nil:
 			if again, gerr := api.Get(ctx, created.ID); gerr == nil {
 				created = again
 			} else {
 				created.Status = "approved"
 			}
+		case arrmada.Transient(err):
+			// Silo asks again; Arrmada answers that request with the one
+			// just made, and the approval is tried again.
+			return nil, err
+		case !errors.As(err, &se) || se.Code != http.StatusForbidden:
+			// A refusal that will repeat, such as a quality profile Arrmada
+			// does not have.
+			approveNote = "Not approved: " + strings.TrimPrefix(err.Error(), "arrmada: ")
 		}
 	}
 	target.ExternalId = strconv.FormatInt(created.ID, 10)
 	st := statusOf(created)
 	target.Status, target.ExternalStatus, target.Message, target.Wording = st.Status, st.ExternalStatus, st.Message, st.Wording
+	if approveNote != "" {
+		target.Message = approveNote
+	}
 	return &pluginv1.FulfillResponse{Targets: []*pluginv1.FulfillmentTarget{target}}, nil
 }
 
@@ -170,6 +188,20 @@ func requestedSeasons(in []int32) []int {
 	}
 	sort.Ints(out)
 	return out
+}
+
+// refused reports whether Arrmada itself answered a request with a refusal
+// that stands: 400, 404, 409, or a quota's 429.
+func refused(err error) bool {
+	var se *arrmada.StatusError
+	if !errors.As(err, &se) || !se.FromArrmada || se.Retry {
+		return false
+	}
+	switch se.Code {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusTooManyRequests:
+		return true
+	}
+	return false
 }
 
 // pickQuality returns the quality to send and its Arrmada profile, or nil.
@@ -309,6 +341,11 @@ func (s *Server) TestConnection(ctx context.Context, req *pluginv1.TestConnectio
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	me, err := api.Me(ctx)
+	if arrmada.Transient(err) {
+		// Unreachable, timed out, or a 5xx: Silo words these itself
+		// ("nothing answered at that address", "didn't answer in time").
+		return nil, err
+	}
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, strings.TrimPrefix(err.Error(), "arrmada: "))
 	}

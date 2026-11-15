@@ -2,6 +2,14 @@
 
 Open an issue before a large change. Pull requests go against `dev`.
 
+## AI disclosure
+
+Every pull request ends with the AI disclosure block from
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md), in the
+format of Silo's
+[AI-assisted contribution policy](https://github.com/Silo-Server/silo-server/blob/main/docs/ai-contributions.md).
+"No AI used" is a complete answer when true.
+
 ## Checks
 
 Run these before opening a pull request; CI runs the same:
@@ -30,8 +38,8 @@ then attaches `index.json`, the Silo plugin repository index.
 
    ```sh
    git switch main && git pull --ff-only
-   git tag -a v0.2.1 -m v0.2.1 <commit on main that changed manifest.json>
-   git push origin v0.2.1
+   git tag -a v0.2.2 -m v0.2.2 <commit on main that changed manifest.json>
+   git push origin v0.2.2
    ```
 
 The shared workflow fails without publishing anything if the tag is not
@@ -48,5 +56,5 @@ gh attestation verify plugin-linux-amd64 \
   --repo zorcerer/silo-plugin-arrmada \
   --cert-identity https://github.com/Silo-Server/.github/.github/workflows/plugin-release.yml@refs/heads/main \
   --cert-oidc-issuer https://token.actions.githubusercontent.com \
-  --source-ref refs/tags/v0.2.1
+  --source-ref refs/tags/v0.2.2
 ```

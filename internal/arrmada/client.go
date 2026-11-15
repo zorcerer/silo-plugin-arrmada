@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -102,8 +103,23 @@ func newClient(baseURL string, cred Credential, httpClient *http.Client) (*clien
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: requestTimeout}
 	}
-	return &client{baseURL: baseURL, cred: cred, httpClient: httpClient}, nil
+	// A copy, so a caller's client keeps its own redirect policy.
+	hc := *httpClient
+	hc.CheckRedirect = refuseRedirect
+	return &client{baseURL: baseURL, cred: cred, httpClient: &hc}, nil
 }
+
+// refuseRedirect stops at the first redirect. Go copies headers such as
+// X-Api-Key to the new address, even on another host, and re-sends a sign-in
+// body on a 307 or 308, so following one could hand the credential to
+// whatever the redirect names.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("%w to %s; enter the address Arrmada answers on", ErrRedirected, req.URL.Host)
+}
+
+// ErrRedirected is an address that answered with a redirect, which the
+// plugin does not follow. Asking again gives the same answer.
+var ErrRedirected = errors.New("the address redirected")
 
 // sessions holds one session cookie per Arrmada address and account, for the
 // life of the plugin process. Silo restarts the process at will; the next
@@ -154,7 +170,7 @@ func (c *client) signIn(ctx context.Context) error {
 		return fmt.Errorf("arrmada: sign in: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		return fmt.Errorf("arrmada: the password for %q was refused (status 401)", c.cred.Username)
@@ -169,8 +185,18 @@ func (c *client) signIn(ctx context.Context) error {
 			return nil
 		}
 	}
-	// Two-factor sign-in answers 200 with a ticket for the code and no cookie.
-	return fmt.Errorf("arrmada: %q has two-factor sign-in on, which the plugin cannot complete; use an account without it", c.cred.Username)
+	// Two-factor sign-in answers 200 with {"two_factor":"code"|"setup",
+	// "ticket":...} and no cookie. Anything else is not Arrmada's sign-in.
+	var tf struct {
+		TwoFactor string `json:"two_factor"`
+	}
+	if json.Unmarshal(raw, &tf) == nil && tf.TwoFactor == "setup" {
+		return fmt.Errorf("arrmada: %q must set up two-factor sign-in before it can sign in, which the plugin cannot complete; use an account that is not required to", c.cred.Username)
+	}
+	if json.Unmarshal(raw, &tf) == nil && tf.TwoFactor != "" {
+		return fmt.Errorf("arrmada: %q has two-factor sign-in on, which the plugin cannot complete; use an account without it", c.cred.Username)
+	}
+	return fmt.Errorf("arrmada: %s answered the sign-in without a session, and not as Arrmada does: the address is wrong, or a sign-in page in front of Arrmada caught the request", c.baseURL)
 }
 
 // getJSON GETs path (which starts with /api/v1) and decodes the body into dest.
@@ -246,17 +272,41 @@ func (c *client) send(ctx context.Context, method, path string, body []byte) (*h
 	return resp, nil
 }
 
-// StatusError is an HTTP error from Arrmada, with its message.
+// StatusError is an HTTP error answer, with its message.
 type StatusError struct {
 	Code    int
 	Message string
+	// FromArrmada: the body was Arrmada's own {"status":"error"}.
+	FromArrmada bool
+	// Retry: asking again later can succeed (a 5xx, a timeout, the
+	// wrong-key throttle), as opposed to a refusal that stands.
+	Retry bool
 }
 
 func (e *StatusError) Error() string { return e.Message }
 
-// Is makes a 404 match errNotFound.
+// Is makes Arrmada's own 404 match errNotFound. A 404 from something else at
+// the address does not mean the title or request is gone.
 func (e *StatusError) Is(target error) bool {
-	return target == errNotFound && e.Code == http.StatusNotFound
+	return target == errNotFound && e.Code == http.StatusNotFound && e.FromArrmada
+}
+
+// Transient reports whether err may succeed if the same call is made again:
+// the connection failed or timed out, or Arrmada answered with a 5xx, a 408
+// or its throttle.
+func Transient(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		return se.Retry
+	}
+	if errors.Is(err, ErrRedirected) {
+		return false
+	}
+	var ue *url.Error
+	return errors.As(err, &ue) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (c *client) read(resp *http.Response, path string, dest any) error {
@@ -292,32 +342,38 @@ func (c *client) statusError(resp *http.Response, path string) error {
 	fromArrmada := json.Unmarshal(raw, &body) == nil && body.Status == "error" && body.Message != ""
 	code := resp.StatusCode
 	where := pathOnly(path)
+	retry := code >= 500 || code == http.StatusRequestTimeout
+	mk := func(msg string) *StatusError {
+		return &StatusError{Code: code, Message: msg, FromArrmada: fromArrmada, Retry: retry}
+	}
 
-	if (code == http.StatusUnauthorized || code == http.StatusForbidden) && !fromArrmada {
-		return &StatusError{code, fmt.Sprintf("arrmada: %s answered status %d to %s, but not the way Arrmada answers: something in front of Arrmada, such as a reverse proxy's sign-in, refused the request. Use an address that reaches Arrmada itself, such as http://arrmada:7878", c.baseURL, code, where)}
+	if !fromArrmada {
+		// Not Arrmada's answer. Its body stays out of the message: it shows
+		// in Silo's admin form, and the address could be any service.
+		if code == http.StatusUnauthorized || code == http.StatusForbidden {
+			return mk(fmt.Sprintf("arrmada: %s answered status %d to %s, but not the way Arrmada answers: something in front of Arrmada, such as a reverse proxy's sign-in, refused the request. Use an address that reaches Arrmada itself, such as http://arrmada:7878", c.baseURL, code, where))
+		}
+		return mk(fmt.Sprintf("arrmada: %s answered status %d to %s, not as Arrmada does: check the address", c.baseURL, code, where))
 	}
 	switch {
 	case code == http.StatusUnauthorized && c.cred.IsAccount():
-		return &StatusError{code, fmt.Sprintf("arrmada: the session for %q was refused (status 401): %s", c.cred.Username, body.Message)}
+		return mk(fmt.Sprintf("arrmada: the session for %q was refused (status 401): %s", c.cred.Username, body.Message))
 	case code == http.StatusUnauthorized && body.Message == "authentication required":
 		// Arrmada ignores a value that is not shaped like one of its keys.
-		return &StatusError{code, "arrmada: Arrmada did not recognise the API key (status 401). Paste the whole key: arrk_ followed by 52 characters"}
+		return mk("arrmada: Arrmada did not recognise the API key (status 401). Paste the whole key: arrk_ followed by 52 characters")
 	case code == http.StatusUnauthorized:
-		return &StatusError{code, "arrmada: Arrmada refused the API key (status 401): " + body.Message}
+		return mk("arrmada: Arrmada refused the API key (status 401): " + body.Message)
 	case code == http.StatusForbidden && !c.cred.IsAccount():
-		return &StatusError{code, fmt.Sprintf("arrmada: Arrmada refused %s for this API key (status 403): %s. Requests need a key with Full access; approving needs a manager or admin account", where, body.Message)}
+		return mk(fmt.Sprintf("arrmada: Arrmada refused %s for this API key (status 403): %s. Requests need a key with Full access; approving needs a manager or admin account", where, body.Message))
 	case code == http.StatusForbidden:
-		return &StatusError{code, fmt.Sprintf("arrmada: Arrmada refused %s for %q (status 403): %s", where, c.cred.Username, body.Message)}
-	case code == http.StatusTooManyRequests && !c.cred.IsAccount() && strings.HasPrefix(body.Message, "too many attempts"):
-		// Arrmada's throttle on wrong keys; a request quota is also a 429,
-		// with its own message.
-		return &StatusError{code, "arrmada: too many wrong API keys from this address (status 429); wait 15 minutes and try the right key"}
+		return mk(fmt.Sprintf("arrmada: Arrmada refused %s for %q (status 403): %s", where, c.cred.Username, body.Message))
+	case code == http.StatusTooManyRequests && strings.HasPrefix(body.Message, "too many attempts"):
+		// Arrmada's throttle on wrong keys and passwords. A request quota is
+		// also a 429, with its own message, and stands until it resets.
+		retry = true
+		return mk("arrmada: too many wrong API keys or passwords from this address (status 429); wait 15 minutes")
 	}
-	text := strings.TrimSpace(string(raw))
-	if fromArrmada {
-		text = body.Message
-	}
-	return &StatusError{code, fmt.Sprintf("arrmada: status %d from %s: %s", code, where, text)}
+	return mk(fmt.Sprintf("arrmada: status %d from %s: %s", code, where, body.Message))
 }
 
 // pathOnly drops the query from path for error text.
