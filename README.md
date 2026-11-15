@@ -14,6 +14,9 @@ account.
 
 ## Network access and data
 
+- The plugin exposes no network service: it declares no HTTP routes and
+  opens no port. Silo starts it as a child process and talks to it over a
+  Unix domain socket that go-plugin creates in a temporary directory.
 - The plugin connects to one address: the Arrmada address on each Silo
   connection. It makes no other outbound connections and sends no telemetry.
 - It stores nothing on disk. Silo stores the address and credential
@@ -27,6 +30,15 @@ account.
   plugin process. The password is never written to a log or an error.
 - Requests use the `X-Api-Key` header; Autoscan signs in with
   `POST /api/v1/auth/login`. Both send the User-Agent `silo-plugin-arrmada`.
+- It does not follow redirects, verifies TLS certificates on `https://`
+  addresses, and reads at most 16 MiB of any answer.
+- Over `http://`, the API key and the Autoscan password cross the network
+  unencrypted. On a Docker network between two containers on one host that
+  stays inside the host; across machines, use `https://`.
+- The Arrmada address must be `http://` or `https://` with a host, and
+  without credentials, a query or a fragment.
+- Only absolute paths without control characters are passed to Silo, which
+  scans a path only inside one of its library folders.
 
 ## Compatibility
 

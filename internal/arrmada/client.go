@@ -93,9 +93,9 @@ type client struct {
 }
 
 func newClient(baseURL string, cred Credential, httpClient *http.Client) (*client, error) {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
-	if baseURL == "" {
-		return nil, errors.New("the connection has no Arrmada address")
+	baseURL, err := checkBaseURL(baseURL)
+	if err != nil {
+		return nil, err
 	}
 	if cred.APIKey == "" && !cred.IsAccount() {
 		return nil, errors.New("the connection has no Arrmada API key or account")
@@ -107,6 +107,27 @@ func newClient(baseURL string, cred Credential, httpClient *http.Client) (*clien
 	hc := *httpClient
 	hc.CheckRedirect = refuseRedirect
 	return &client{baseURL: baseURL, cred: cred, httpClient: &hc}, nil
+}
+
+// checkBaseURL accepts an http or https address with a host, and an optional
+// path. Request paths are appended to it as text, so a query or fragment
+// would bend them, and a user:password in it would be repeated in the error
+// messages Silo shows; credentials belong in the key field.
+func checkBaseURL(raw string) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", errors.New("the connection has no Arrmada address")
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https"):
+		return "", errors.New("the Arrmada address must be http:// or https:// with a host, such as http://arrmada:7878")
+	case u.User != nil:
+		return "", errors.New("the Arrmada address holds a user name or password; put credentials in the API key field instead")
+	case u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(raw, "?#"):
+		return "", errors.New("the Arrmada address must not have a ? or # part")
+	}
+	return raw, nil
 }
 
 // refuseRedirect stops at the first redirect. Go copies headers such as

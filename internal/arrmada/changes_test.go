@@ -562,3 +562,48 @@ func TestAnotherServicesBodyStaysOutOfErrors(t *testing.T) {
 		t.Fatal("a 404 without Arrmada's body matched errNotFound")
 	}
 }
+
+func TestBaseURLChecks(t *testing.T) {
+	for _, bad := range []string{
+		"arrmada:7878",                    // no scheme
+		"ftp://arrmada",                   // not http
+		"http://",                         // no host
+		"http://silo:secret@arrmada:7878", // credentials in the address
+		"http://arrmada:7878/?a=b",        // a query bends every path
+		"http://arrmada:7878#x",           // so does a fragment
+	} {
+		if _, err := checkBaseURL(bad); err == nil {
+			t.Errorf("checkBaseURL(%q) accepted it", bad)
+		} else if strings.Contains(err.Error(), "secret") {
+			t.Errorf("checkBaseURL(%q) repeats the password: %v", bad, err)
+		}
+	}
+	for in, want := range map[string]string{
+		" http://Arrmada:7878/ ":       "http://Arrmada:7878",
+		"https://arr.example.com/arr/": "https://arr.example.com/arr",
+	} {
+		if got, err := checkBaseURL(in); err != nil || got != want {
+			t.Errorf("checkBaseURL(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
+
+func TestOnlyAbsolutePathsAreReported(t *testing.T) {
+	in := []Change{
+		{Path: "/m/a.mkv", Scope: ScopeFile},
+		{Path: `D:\TV\Show`, Scope: ScopeSubtree},
+		{Path: `\\nas\tv\Show`, Scope: ScopeSubtree},
+		{Path: "relative/a.mkv", Scope: ScopeFile},
+		{Path: "/m/b.mkv\n/etc/passwd", Scope: ScopeFile},
+		{Path: "/m/c\x00.mkv", Scope: ScopeFile},
+	}
+	got := dedupe(in)
+	want := []Change{
+		{Path: "/m/a.mkv", Scope: ScopeFile},
+		{Path: `D:\TV\Show`, Scope: ScopeSubtree},
+		{Path: `\\nas\tv\Show`, Scope: ScopeSubtree},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
