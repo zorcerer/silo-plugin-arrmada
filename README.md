@@ -12,6 +12,34 @@ They take different credentials. Arrmada's personal API keys reach its
 requests routes but not its history or library, so Autoscan signs in with an
 account.
 
+## Network access and data
+
+- The plugin connects to one address: the Arrmada address on each Silo
+  connection. It makes no other outbound connections and sends no telemetry.
+- It stores nothing on disk. Silo stores the address and credential
+  (encrypted) and sends them with every call.
+- Requests send Arrmada the title's TMDB id, title, year, seasons and the
+  note "Requested in Silo by <user>", where `<user>` is the Silo username of
+  the requester.
+- Autoscan reads Arrmada's history and the file paths of the titles in it,
+  and returns those paths to Silo.
+- Autoscan's account session cookie is held in memory for the life of the
+  plugin process. The password is never written to a log or an error.
+- Requests use the `X-Api-Key` header; Autoscan signs in with
+  `POST /api/v1/auth/login`. Both send the User-Agent `silo-plugin-arrmada`.
+
+## Compatibility
+
+Built against [`silo-plugin-sdk`](https://github.com/Silo-Server/silo-plugin-sdk)
+v0.32.1 and Silo API `v1`, for linux/amd64, linux/arm64 and darwin/arm64.
+Arrmada 0.3.1 or later, the first release with personal API keys. Requests
+have been used with Arrmada 0.4.0 and a Silo `build-2249` server.
+
+A Silo server running in Docker reaches Arrmada by its container name on a
+shared Docker network (`http://Arrmada:7878`). A reverse proxy in front of
+Arrmada that admits only some source addresses answers the Silo container
+with 403; the connection test says so.
+
 ## Install
 
 In Silo, under Admin, Plugins, add a repository with this URL, then install
@@ -145,9 +173,28 @@ make e2e          # builds the binary and calls it over go-plugin gRPC, as Silo 
 ./plugin manifest # the manifest Silo reads from the binary
 ```
 
-The version in the manifest comes from `git describe`, or
-`VERSION=1.2.3 make build`. `go run ./cmd/index -version 1.2.3 -dist dist`
+The version is `manifest.json`'s, which a release tag must match. `go run ./cmd/index -version 1.2.3 -dist dist`
 writes the repository index for binaries in `dist/`.
+
+## Support
+
+Use [GitHub Issues](https://github.com/zorcerer/silo-plugin-arrmada/issues)
+for questions and bug reports. Report security problems privately, as
+[`SECURITY.md`](SECURITY.md) describes.
+
+## Releases
+
+Releases are built and signed by Silo's shared plugin release workflow.
+[CONTRIBUTING.md](CONTRIBUTING.md#release) describes how a release is cut and
+how to verify a downloaded binary.
+
+## AI disclosure
+
+Written with Claude Code (CLI), model `claude-opus-5-5`, which wrote the code,
+tests and documentation. I direct the work and test it on my own Silo and
+Arrmada: Requests have been tested there; Autoscan so far only by the test
+suite. No independent code review has been run yet. Pull requests in this
+repository state the same for their own changes.
 
 ## License
 

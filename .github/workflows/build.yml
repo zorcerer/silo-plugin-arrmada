@@ -1,26 +1,18 @@
 # Checks, tests and builds the plugin on every push and pull request, and
-# keeps the three binaries as an artifact of the run.
-#
-# `release.yml` calls this with the version of a tag, and attaches what it
-# builds to the release.
+# keeps the three binaries as an artifact of the run. Releases are built by
+# release.yml, through Silo's shared plugin release workflow.
 name: build
 
 on:
   push:
     branches: [main, dev]
   pull_request:
-  workflow_call:
-    inputs:
-      version:
-        description: The version the manifest carries, without the v.
-        required: true
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: build-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version || 'dev' }}
+  group: build-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      VERSION: ${{ inputs.version || '0.0.0-dev' }}
+      GOWORK: "off"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -37,6 +29,15 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+
+      # The shared release workflow refuses these; fail here first.
+      - name: Reject local replaces
+        run: |
+          bad="$(go mod edit -json | jq -r '.Replace // [] | .[] | select(.Old.Path == "github.com/Silo-Server/silo-plugin-sdk" or (.New.Path | startswith("/")) or (.New.Path | startswith("../"))) | .Old.Path')"
+          if [ -n "$bad" ]; then
+            echo "::error file=go.mod::go.mod has replace directives a release cannot use: $bad"
+            exit 1
+          fi
 
       - name: Format and vet
         run: make vet
@@ -47,11 +48,14 @@ jobs:
       - name: Build
         run: make build-all
 
+      # The binary carries manifest.json's version, which the release tag
+      # must match.
       - name: Check the manifest
         run: |
           make build
-          ./plugin manifest | jq -e --arg version "$VERSION" '.version == $version'
-          ./plugin manifest | jq -e '.capabilities[0].type == "scan_source.v1"'
+          version="$(jq -r .version manifest.json)"
+          ./plugin manifest | jq -e --arg version "$version" '.version == $version'
+          ./plugin manifest | jq -e '[.capabilities[].type] | sort == ["request_router.v1", "scan_source.v1"]'
 
       - uses: actions/upload-artifact@v7
         with:

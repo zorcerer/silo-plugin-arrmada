@@ -33,7 +33,7 @@ func TestIndexDecodesAsSiloReadsIt(t *testing.T) {
 		}
 	}
 	var buf bytes.Buffer
-	if err := run(&buf, "1.2.3", dist, "../../manifest.json", false); err != nil {
+	if err := run(&buf, defaultRepo, "1.2.3", dist, "../../manifest.json", false); err != nil {
 		t.Fatal(err)
 	}
 	var idx siloIndex
@@ -89,10 +89,32 @@ func TestIndexDecodesAsSiloReadsIt(t *testing.T) {
 
 func TestIndexRefusesMissingBinariesAndBadVersions(t *testing.T) {
 	var buf bytes.Buffer
-	if err := run(&buf, "1.2.3", t.TempDir(), "../../manifest.json", false); err == nil || !strings.Contains(err.Error(), "plugin-linux-amd64") {
+	if err := run(&buf, defaultRepo, "1.2.3", t.TempDir(), "../../manifest.json", false); err == nil || !strings.Contains(err.Error(), "plugin-linux-amd64") {
 		t.Fatalf("missing binaries: %v", err)
 	}
-	if err := run(&buf, "v1.2", t.TempDir(), "../../manifest.json", false); err == nil {
+	if err := run(&buf, defaultRepo, "v1.2", t.TempDir(), "../../manifest.json", false); err == nil {
 		t.Fatal("a bad version was accepted")
+	}
+}
+
+func TestIndexFollowsTheRepository(t *testing.T) {
+	dist := t.TempDir()
+	for _, n := range []string{"plugin-linux-amd64", "plugin-linux-arm64", "plugin-darwin-arm64"} {
+		if err := os.WriteFile(filepath.Join(dist, n), []byte(n), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	idx, err := build("Silo-Community/silo-plugin-arrmada", "1.2.3", dist, "../../manifest.json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := idx.Plugins[0]
+	if p.RepoURL != "https://github.com/Silo-Community/silo-plugin-arrmada" ||
+		!strings.HasPrefix(p.Binaries["linux/arm64"].URL, "https://github.com/Silo-Community/silo-plugin-arrmada/releases/download/v1.2.3/") ||
+		!strings.HasSuffix(p.BundleURL, "/v1.2.3/plugin.sigstore.json") {
+		t.Fatalf("package = %+v", p)
+	}
+	if _, err := build("not a repo", "1.2.3", dist, "../../manifest.json", false); err == nil {
+		t.Fatal("a bad repository name was accepted")
 	}
 }

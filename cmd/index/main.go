@@ -24,7 +24,9 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
-const repo = "zorcerer/silo-plugin-arrmada"
+// defaultRepo is where releases are published; release.yml passes its own
+// repository, so the index follows the plugin if it moves.
+const defaultRepo = "zorcerer/silo-plugin-arrmada"
 
 // The index shape Silo decodes (internal/plugins/catalog_service.go), written
 // with encoding/json as Silo's own catalog tool writes it.
@@ -45,22 +47,26 @@ type repositoryIndex struct {
 	Plugins []catalogPackage `json:"plugins"`
 }
 
-var semver = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+var (
+	semver   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+	repoName = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
+)
 
 func main() {
 	version := flag.String("version", "", "release version, without the v")
 	dist := flag.String("dist", "dist", "folder holding plugin-<os>-<arch>")
 	manifestPath := flag.String("manifest", "manifest.json", "the plugin's manifest")
 	bundle := flag.Bool("bundle", false, "the release has plugin.sigstore.json")
+	repo := flag.String("repo", defaultRepo, "GitHub repository the release is in, owner/name")
 	flag.Parse()
-	if err := run(os.Stdout, *version, *dist, *manifestPath, *bundle); err != nil {
+	if err := run(os.Stdout, *repo, *version, *dist, *manifestPath, *bundle); err != nil {
 		fmt.Fprintln(os.Stderr, "index:", err)
 		os.Exit(1)
 	}
 }
 
-func run(w io.Writer, version, dist, manifestPath string, bundle bool) error {
-	idx, err := build(version, dist, manifestPath, bundle)
+func run(w io.Writer, repo, version, dist, manifestPath string, bundle bool) error {
+	idx, err := build(repo, version, dist, manifestPath, bundle)
 	if err != nil {
 		return err
 	}
@@ -72,7 +78,10 @@ func run(w io.Writer, version, dist, manifestPath string, bundle bool) error {
 	return err
 }
 
-func build(version, dist, manifestPath string, bundle bool) (repositoryIndex, error) {
+func build(repo, version, dist, manifestPath string, bundle bool) (repositoryIndex, error) {
+	if !repoName.MatchString(repo) {
+		return repositoryIndex{}, fmt.Errorf("repository %q is not owner/name", repo)
+	}
 	if !semver.MatchString(version) {
 		return repositoryIndex{}, fmt.Errorf("version %q is not 1.2.3", version)
 	}
