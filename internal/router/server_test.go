@@ -26,6 +26,9 @@ type fakeArrmada struct {
 	// role is what /auth/me says; approveForbidden answers /approve with 403.
 	role             string
 	approveForbidden bool
+	// approveStatus and approveBody replace the approve answer when set.
+	approveStatus int
+	approveBody   string
 	// createStatus and createBody replace the create answer when set.
 	createStatus int
 	createBody   string
@@ -78,6 +81,11 @@ func (f *fakeArrmada) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && scan(r.URL.Path, "/api/v1/requests/%d/approve", &id):
 		if f.approveForbidden {
 			http.Error(w, `{"status":"error","message":"insufficient permissions"}`, http.StatusForbidden)
+			return
+		}
+		if f.approveStatus != 0 {
+			w.WriteHeader(f.approveStatus)
+			_, _ = w.Write([]byte(f.approveBody))
 			return
 		}
 		var body map[string]any
@@ -412,5 +420,68 @@ func TestFulfillSendsOnlyTheRequestedSeasons(t *testing.T) {
 	fulfill(t, f, map[string]any{}, req)
 	if _, ok := f.created[0]["seasons"]; ok {
 		t.Fatalf("a movie request carried seasons: %v", f.created[0])
+	}
+}
+
+func TestFulfillLeavesTemporaryFailuresToSilo(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+		body string
+	}{
+		{"Arrmada failing", 500, `{"status":"error","message":"could not save the request"}`},
+		{"a proxy while Arrmada restarts", 502, `<html>Bad Gateway</html>`},
+		{"the key refused", 401, `{"status":"error","message":"this API key isn't valid: it may have been revoked or have expired"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			f.createStatus, f.createBody = c.code, c.body
+			srv := httptest.NewServer(f)
+			defer srv.Close()
+			req := movieRequest(hd)
+			req.Connections = []*pluginv1.RouterConnection{conn(t, srv.URL, map[string]any{})}
+			resp, err := New().Fulfill(context.Background(), req)
+			if err == nil {
+				t.Fatalf("Fulfill = %v, want an error Silo retries", resp)
+			}
+		})
+	}
+}
+
+func TestFulfillApprovalFailures(t *testing.T) {
+	// A temporary failure: an error, so Silo asks again.
+	f := newFake()
+	f.approveStatus, f.approveBody = 502, `{"status":"error","message":"could not add the title"}`
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	req := movieRequest(hd)
+	req.Connections = []*pluginv1.RouterConnection{conn(t, srv.URL, map[string]any{})}
+	if resp, err := New().Fulfill(context.Background(), req); err == nil {
+		t.Fatalf("Fulfill = %v, want an error", resp)
+	}
+
+	// A refusal that will repeat: pending, saying why.
+	f = newFake()
+	f.approveStatus, f.approveBody = 400, `{"status":"error","message":"unknown quality profile"}`
+	tg := fulfill(t, f, map[string]any{"quality_profile": "nope"}, movieRequest(hd)).GetTargets()[0]
+	if tg.GetStatus() != "queued" || !strings.Contains(tg.GetMessage(), "unknown quality profile") {
+		t.Fatalf("target = %v", tg)
+	}
+}
+
+func TestTestConnectionLeavesUnreachableToSilo(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	url := srv.URL
+	srv.Close() // nothing answers here now
+	_, err := New().TestConnection(context.Background(), &pluginv1.TestConnectionRequest{Connection: conn(t, url, map[string]any{})})
+	if err == nil {
+		t.Fatal("TestConnection succeeded against a closed address")
+	}
+	if st, _ := status.FromError(err); st.Code() == codes.InvalidArgument {
+		t.Fatalf("an unreachable address came back as InvalidArgument, which bypasses Silo's own wording: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("Silo words this from %q, which is missing: %v", "connection refused", err)
 	}
 }
