@@ -12,6 +12,8 @@ import (
 	"time"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/zorcerer/silo-plugin-arrmada/internal/arrmada"
@@ -276,15 +278,17 @@ func statusOf(r arrmada.Request) *pluginv1.TargetStatus {
 	return out
 }
 
-// TestConnection signs in and says as whom.
+// TestConnection signs in and says as whom. A failure is returned as an
+// InvalidArgument status: Silo shows that text on the form as it is, where a
+// failed response is rewritten into one of its own generic messages.
 func (s *Server) TestConnection(ctx context.Context, req *pluginv1.TestConnectionRequest) (*pluginv1.TestConnectionResponse, error) {
 	api, err := s.client(req.GetConnection())
 	if err != nil {
-		return &pluginv1.TestConnectionResponse{Message: err.Error()}, nil
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	me, err := api.Me(ctx)
 	if err != nil {
-		return &pluginv1.TestConnectionResponse{Message: strings.TrimPrefix(err.Error(), "arrmada: ")}, nil
+		return nil, status.Error(codes.InvalidArgument, strings.TrimPrefix(err.Error(), "arrmada: "))
 	}
 	msg := fmt.Sprintf("Connected to Arrmada as %s (%s)", me.Username, me.Role)
 	if readConfig(req.GetConnection()).Approve && me.Role != "manager" && me.Role != "admin" {

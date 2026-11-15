@@ -52,6 +52,9 @@ func ParseCredential(s string) (Credential, error) {
 	case s == "":
 		return Credential{}, errors.New("the connection has no Arrmada API key or account")
 	case strings.HasPrefix(s, "arrk_"):
+		if !looksLikeKey(s) {
+			return Credential{}, fmt.Errorf("the API key is not shaped like an Arrmada key: arrk_ followed by 52 characters from a-z and 2-7, and this one has %d after arrk_. Paste the whole key", len(s)-len("arrk_"))
+		}
 		return Credential{APIKey: s}, nil
 	}
 	user, pass, ok := strings.Cut(s, ":")
@@ -59,6 +62,21 @@ func ParseCredential(s string) (Credential, error) {
 		return Credential{}, errors.New("the connection's key is neither an Arrmada API key (arrk_...) nor username:password")
 	}
 	return Credential{Username: strings.TrimSpace(user), Password: pass}, nil
+}
+
+// looksLikeKey is Arrmada's own test (auth.LooksLikeAPIKey). Arrmada ignores
+// a value that fails it and answers as if no key were sent.
+func looksLikeKey(s string) bool {
+	body, ok := strings.CutPrefix(s, "arrk_")
+	if !ok || len(body) != 52 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		if c := body[i]; !('a' <= c && c <= 'z' || '2' <= c && c <= '7') {
+			return false
+		}
+	}
+	return true
 }
 
 // IsAccount reports whether the credential signs in with a password.
@@ -139,11 +157,11 @@ func (c *client) signIn(ctx context.Context) error {
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		return fmt.Errorf("arrmada: the password for %q was refused (HTTP 401)", c.cred.Username)
+		return fmt.Errorf("arrmada: the password for %q was refused (status 401)", c.cred.Username)
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return errors.New("arrmada: too many sign-in attempts from this address (HTTP 429); try again later")
+		return errors.New("arrmada: too many sign-in attempts from this address (status 429); try again later")
 	case resp.StatusCode >= 400:
-		return fmt.Errorf("arrmada: sign-in failed (HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("arrmada: sign-in failed (status %d)", resp.StatusCode)
 	}
 	for _, ck := range resp.Cookies() {
 		if ck.Name == sessionCookie && ck.Value != "" {
@@ -242,39 +260,64 @@ func (e *StatusError) Is(target error) bool {
 }
 
 func (c *client) read(resp *http.Response, path string, dest any) error {
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized:
-		return &StatusError{resp.StatusCode, "arrmada: the API key was refused (HTTP 401)"}
-	case resp.StatusCode == http.StatusForbidden:
-		msg := "arrmada: the account may not do this (HTTP 403)"
-		if !c.cred.IsAccount() {
-			msg = "arrmada: the API key may not do this (HTTP 403): Arrmada keys reach only its requests and discover routes, and a read-only key only GET"
-		}
-		return &StatusError{resp.StatusCode, msg}
-	case resp.StatusCode >= 400:
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
-		var e struct {
-			Message string `json:"message"`
-			Error   string `json:"error"`
-		}
-		text := strings.TrimSpace(string(raw))
-		if json.Unmarshal(raw, &e) == nil {
-			if e.Message != "" {
-				text = e.Message
-			} else if e.Error != "" {
-				text = e.Error
-			}
-		}
-		return &StatusError{resp.StatusCode, fmt.Sprintf("arrmada: HTTP %d from %s: %s", resp.StatusCode, pathOnly(path), text)}
+	if resp.StatusCode >= 400 {
+		return c.statusError(resp, path)
 	}
 	if dest == nil {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBody))
 		return nil
 	}
+	if strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		return fmt.Errorf("arrmada: %s answered %s with a web page, not Arrmada's API: the address is wrong, or a sign-in page in front of Arrmada caught the request. Use an address that reaches Arrmada itself, such as http://arrmada:7878", c.baseURL, pathOnly(path))
+	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxResponseBody)).Decode(dest); err != nil {
 		return fmt.Errorf("arrmada: read %s: %w", pathOnly(path), err)
 	}
 	return nil
+}
+
+// statusError explains an error answer. Arrmada answers every error with
+// {"status":"error","message":...}; a 401 or 403 without that body came from
+// something in front of Arrmada, such as a reverse proxy's sign-in.
+//
+// The text says "status 401", not "HTTP 401": Silo replaces any request
+// router message containing "HTTP 401" or "HTTP 403" with "The server
+// rejected this API key", which hides which of these it was.
+func (c *client) statusError(resp *http.Response, path string) error {
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	var body struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	fromArrmada := json.Unmarshal(raw, &body) == nil && body.Status == "error" && body.Message != ""
+	code := resp.StatusCode
+	where := pathOnly(path)
+
+	if (code == http.StatusUnauthorized || code == http.StatusForbidden) && !fromArrmada {
+		return &StatusError{code, fmt.Sprintf("arrmada: %s answered status %d to %s, but not the way Arrmada answers: something in front of Arrmada, such as a reverse proxy's sign-in, refused the request. Use an address that reaches Arrmada itself, such as http://arrmada:7878", c.baseURL, code, where)}
+	}
+	switch {
+	case code == http.StatusUnauthorized && c.cred.IsAccount():
+		return &StatusError{code, fmt.Sprintf("arrmada: the session for %q was refused (status 401): %s", c.cred.Username, body.Message)}
+	case code == http.StatusUnauthorized && body.Message == "authentication required":
+		// Arrmada ignores a value that is not shaped like one of its keys.
+		return &StatusError{code, "arrmada: Arrmada did not recognise the API key (status 401). Paste the whole key: arrk_ followed by 52 characters"}
+	case code == http.StatusUnauthorized:
+		return &StatusError{code, "arrmada: Arrmada refused the API key (status 401): " + body.Message}
+	case code == http.StatusForbidden && !c.cred.IsAccount():
+		return &StatusError{code, fmt.Sprintf("arrmada: Arrmada refused %s for this API key (status 403): %s. Requests need a key with Full access; approving needs a manager or admin account", where, body.Message)}
+	case code == http.StatusForbidden:
+		return &StatusError{code, fmt.Sprintf("arrmada: Arrmada refused %s for %q (status 403): %s", where, c.cred.Username, body.Message)}
+	case code == http.StatusTooManyRequests && !c.cred.IsAccount() && strings.HasPrefix(body.Message, "too many attempts"):
+		// Arrmada's throttle on wrong keys; a request quota is also a 429,
+		// with its own message.
+		return &StatusError{code, "arrmada: too many wrong API keys from this address (status 429); wait 15 minutes and try the right key"}
+	}
+	text := strings.TrimSpace(string(raw))
+	if fromArrmada {
+		text = body.Message
+	}
+	return &StatusError{code, fmt.Sprintf("arrmada: status %d from %s: %s", code, where, text)}
 }
 
 // pathOnly drops the query from path for error text.

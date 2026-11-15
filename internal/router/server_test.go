@@ -11,12 +11,14 @@ import (
 	"testing"
 
 	pluginv1 "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginproto/silo/plugin/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/zorcerer/silo-plugin-arrmada/internal/arrmada"
 )
 
-const key = "arrk_router"
+const key = "arrk_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"
 
 // fakeArrmada serves the requests routes a personal API key reaches.
 type fakeArrmada struct {
@@ -40,8 +42,16 @@ func newFake() *fakeArrmada {
 func (f *fakeArrmada) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if r.Header.Get("X-Api-Key") != key {
-		http.Error(w, `{"status":"error","message":"invalid API key"}`, http.StatusUnauthorized)
+	if got := r.Header.Get("X-Api-Key"); got != key {
+		// Arrmada's answers: a key-shaped value that matches no key, and no
+		// key it recognises at all.
+		msg := "authentication required"
+		if strings.HasPrefix(got, "arrk_") && len(got) == len(key) {
+			msg = "this API key isn't valid: it may have been revoked or have expired"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": msg})
 		return
 	}
 	write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
@@ -67,7 +77,7 @@ func (f *fakeArrmada) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(map[string]any{"request": req, "subscribed": false})
 	case r.Method == http.MethodPost && scan(r.URL.Path, "/api/v1/requests/%d/approve", &id):
 		if f.approveForbidden {
-			http.Error(w, `{"status":"error","message":"forbidden"}`, http.StatusForbidden)
+			http.Error(w, `{"status":"error","message":"insufficient permissions"}`, http.StatusForbidden)
 			return
 		}
 		var body map[string]any
@@ -295,12 +305,55 @@ func TestTestConnection(t *testing.T) {
 	if !resp.GetOk() || !strings.Contains(resp.GetMessage(), "approval") {
 		t.Fatalf("requester: %v", resp)
 	}
-	bad := conn(t, srv.URL, map[string]any{})
-	bad.ApiKey = "arrk_wrong"
-	resp, _ = New().TestConnection(context.Background(), &pluginv1.TestConnectionRequest{Connection: bad})
-	if resp.GetOk() || !strings.Contains(resp.GetMessage(), "401") {
-		t.Fatalf("wrong key: %v", resp)
+	revoked := conn(t, srv.URL, map[string]any{})
+	revoked.ApiKey = "arrk_" + strings.Repeat("z", 52)
+	assertFormError(t, revoked, "revoked", "")
+}
+
+// assertFormError checks that TestConnection fails with an InvalidArgument
+// status, which Silo shows on the form as written, carrying want and never
+// the words that make Silo replace it with its generic key message.
+func assertFormError(t *testing.T, c *pluginv1.RouterConnection, want, notWant string) {
+	t.Helper()
+	resp, err := New().TestConnection(context.Background(), &pluginv1.TestConnectionRequest{Connection: c})
+	st, _ := status.FromError(err)
+	if err == nil || st.Code() != codes.InvalidArgument {
+		t.Fatalf("TestConnection = %v, %v; want InvalidArgument", resp, err)
 	}
+	if !strings.Contains(st.Message(), want) {
+		t.Fatalf("message %q does not say %q", st.Message(), want)
+	}
+	if notWant != "" && strings.Contains(st.Message(), notWant) {
+		t.Fatalf("message %q says %q", st.Message(), notWant)
+	}
+	if strings.Contains(st.Message(), "HTTP 401") || strings.Contains(st.Message(), "HTTP 403") {
+		t.Fatalf("Silo would replace %q with its generic message", st.Message())
+	}
+}
+
+func TestTestConnectionExplainsWhatRefusedTheKey(t *testing.T) {
+	f := newFake()
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+
+	short := conn(t, srv.URL, map[string]any{})
+	short.ApiKey = "arrk_abc"
+	assertFormError(t, short, "has 3 after arrk_", "")
+
+	// A reverse proxy's sign-in in front of Arrmada.
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	}))
+	defer proxy.Close()
+	assertFormError(t, conn(t, proxy.URL, map[string]any{}), "something in front of Arrmada", "")
+
+	// A sign-in page, reached by redirect, answering 200 with HTML.
+	page := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<!doctype html><title>Sign in</title>"))
+	}))
+	defer page.Close()
+	assertFormError(t, conn(t, page.URL, map[string]any{}), "web page", "")
 }
 
 func mustRequest(t *testing.T, raw string) (r arrmada.Request) {
