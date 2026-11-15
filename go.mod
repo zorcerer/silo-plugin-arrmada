@@ -1,4 +1,4 @@
-module github.com/zorcerer/silo-plugin-autoscan-arrmada
+module github.com/zorcerer/silo-plugin-arrmada
 
 go 1.26.0
 
