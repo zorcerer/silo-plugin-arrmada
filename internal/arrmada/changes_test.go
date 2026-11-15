@@ -386,7 +386,9 @@ func TestParseCredential(t *testing.T) {
 		want Credential
 		ok   bool
 	}{
-		{"arrk_abc", Credential{APIKey: "arrk_abc"}, true},
+		{"arrk_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst", Credential{APIKey: "arrk_abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst"}, true},
+		{"arrk_abc", Credential{}, false},
+		{"arrk_ABCDEFGHIJKLMNOPQRSTUVWXYZ234567ABCDEFGHIJKLMNOPQRST", Credential{}, false},
 		{" silo:pa:ss ", Credential{Username: "silo", Password: "pa:ss"}, true},
 		{"silo:", Credential{}, false},
 		{":pw", Credential{}, false},
