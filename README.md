@@ -188,6 +188,14 @@ Releases are built and signed by Silo's shared plugin release workflow.
 [CONTRIBUTING.md](CONTRIBUTING.md#release) describes how a release is cut and
 how to verify a downloaded binary.
 
+## AI disclosure
+
+Written with Claude Code (CLI), model `claude-opus-5-5`, which wrote the code,
+tests and documentation. I direct the work and test it on my own Silo and
+Arrmada: Requests have been tested there; Autoscan so far only by the test
+suite. No independent code review has been run yet. Pull requests in this
+repository state the same for their own changes.
+
 ## License
 
 MIT
