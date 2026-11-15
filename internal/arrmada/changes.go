@@ -85,8 +85,14 @@ type seriesDetail struct {
 // Poll returns what changed in Arrmada since marker, and the marker to store.
 // haveMarker is false on Silo's first poll of a source: the result is then the
 // current position and no changes, so the source does not replay history.
-func Poll(ctx context.Context, baseURL, apiKey string, marker Marker, haveMarker bool, httpClient *http.Client) ([]Change, Marker, error) {
-	c, err := newClient(baseURL, apiKey, httpClient)
+//
+// cred must be an account: Arrmada's personal API keys do not reach history
+// or the movie and series detail.
+func Poll(ctx context.Context, baseURL string, cred Credential, marker Marker, haveMarker bool, httpClient *http.Client) ([]Change, Marker, error) {
+	if !cred.IsAccount() {
+		return nil, marker, errors.New("Autoscan needs an Arrmada account, not an API key: Arrmada's keys cannot read its history. Put username:password in the connection's API key field")
+	}
+	c, err := newClient(baseURL, cred, httpClient)
 	if err != nil {
 		return nil, marker, err
 	}

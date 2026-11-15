@@ -1,7 +1,7 @@
 //go:build integration
 
 // Builds the plugin binary, starts it over go-plugin the way Silo does, and
-// polls it twice against a stub Arrmada. Run: go test -tags integration .
+// polls it twice and sends it a request against a stub Arrmada. Run: go test -tags integration .
 package main
 
 import (
@@ -22,16 +22,30 @@ import (
 
 func TestPollChangesOverGRPC(t *testing.T) {
 	const apiKey = "arrk_e2e"
+	const account = "silo:pw"
 	const file = "/media/movies/Film (2020)/Film (2020).mkv"
 
 	// The movie import is event 1 before the first poll and event 2 after it.
 	var imported atomic.Bool
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Api-Key") != apiKey {
+		if r.URL.Path == "/api/v1/auth/login" {
+			http.SetCookie(w, &http.Cookie{Name: "arrmada_session", Value: "s1", Path: "/"})
+			_, _ = w.Write([]byte(`{"user":{"username":"silo","role":"manager"}}`))
+			return
+		}
+		ck, _ := r.Cookie("arrmada_session")
+		byKey := r.Header.Get("X-Api-Key") == apiKey
+		if (ck == nil || ck.Value != "s1") && !byKey {
 			http.Error(w, "{}", http.StatusUnauthorized)
 			return
 		}
 		switch r.URL.Path {
+		case "/api/v1/requests":
+			if !byKey {
+				http.Error(w, "{}", http.StatusForbidden)
+				return
+			}
+			_, _ = w.Write([]byte(`{"request":{"id":3,"status":"approved","tracking":{"stage":"searching"}}}`))
 		case "/api/v1/history":
 			if r.URL.Query().Get("kind") != "movie" {
 				_, _ = w.Write([]byte(`{"events":[],"next_before":""}`))
@@ -73,9 +87,9 @@ func TestPollChangesOverGRPC(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	conn := &pluginv1.ResolvedConnection{BaseUrl: stub.URL, ApiKey: apiKey}
+	conn := &pluginv1.ResolvedConnection{BaseUrl: stub.URL, ApiKey: account}
 
-	first, err := rt.ScanSource().PollChanges(ctx, &pluginv1.PollChangesRequest{CapabilityId: "arrmada", Connection: conn})
+	first, err := rt.ScanSource().PollChanges(ctx, &pluginv1.PollChangesRequest{CapabilityId: "autoscan", Connection: conn})
 	if err != nil {
 		t.Fatalf("first poll: %v", err)
 	}
@@ -84,7 +98,7 @@ func TestPollChangesOverGRPC(t *testing.T) {
 	}
 
 	imported.Store(true)
-	second, err := rt.ScanSource().PollChanges(ctx, &pluginv1.PollChangesRequest{CapabilityId: "arrmada", Connection: conn, Marker: first.GetNextMarker()})
+	second, err := rt.ScanSource().PollChanges(ctx, &pluginv1.PollChangesRequest{CapabilityId: "autoscan", Connection: conn, Marker: first.GetNextMarker()})
 	if err != nil {
 		t.Fatalf("second poll: %v", err)
 	}
@@ -96,7 +110,20 @@ func TestPollChangesOverGRPC(t *testing.T) {
 		t.Fatalf("second marker = %q", second.GetNextMarker())
 	}
 
-	if _, err := rt.ScanSource().PollChanges(ctx, &pluginv1.PollChangesRequest{CapabilityId: "arrmada"}); err == nil {
+	if _, err := rt.ScanSource().PollChanges(ctx, &pluginv1.PollChangesRequest{CapabilityId: "autoscan"}); err == nil {
 		t.Fatal("a poll with no connection succeeded")
+	}
+
+	ful, err := rt.RequestRouter().Fulfill(ctx, &pluginv1.FulfillRequest{
+		CapabilityId: "requests",
+		Request:      &pluginv1.RequestDescriptor{MediaType: "movie", Title: "Film", Year: 2020, ExternalIds: map[string]string{"tmdb": "12"}},
+		Qualities:    []*pluginv1.RequestedQuality{{Id: "1080p"}},
+		Connections:  []*pluginv1.RouterConnection{{Id: "c1", BaseUrl: stub.URL, ApiKey: apiKey}},
+	})
+	if err != nil {
+		t.Fatalf("Fulfill: %v", err)
+	}
+	if tg := ful.GetTargets(); len(tg) != 1 || tg[0].GetExternalId() != "3" || tg[0].GetStatus() != "queued" {
+		t.Fatalf("Fulfill = %v", ful)
 	}
 }

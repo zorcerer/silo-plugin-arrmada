@@ -16,8 +16,12 @@ import (
 // fakeArrmada serves the three endpoints the plugin reads, from in-memory
 // history (newest first, per kind) and library detail.
 type fakeArrmada struct {
-	mu      sync.Mutex
-	key     string
+	mu   sync.Mutex
+	user string
+	pass string
+	// logins counts sign-ins; expire drops the session, as a sign-out would.
+	logins  int
+	session string
 	history map[string][]historyEvent
 	movies  map[int64]any
 	series  map[int64]any
@@ -27,7 +31,8 @@ type fakeArrmada struct {
 
 func newFake() *fakeArrmada {
 	return &fakeArrmada{
-		key:     "arrk_test",
+		user:    "silo",
+		pass:    "pa:ss",
 		history: map[string][]historyEvent{},
 		movies:  map[int64]any{},
 		series:  map[int64]any{},
@@ -38,8 +43,25 @@ func (f *fakeArrmada) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, r.URL.RequestURI())
-	if r.Header.Get("X-Api-Key") != f.key {
-		http.Error(w, `{"error":"not signed in"}`, http.StatusUnauthorized)
+	// Tests give some calls a base address with a path of its own.
+	if i := strings.Index(r.URL.Path, "/api/"); i > 0 {
+		r.URL.Path = r.URL.Path[i:]
+	}
+	if r.URL.Path == "/api/v1/auth/login" {
+		var body struct{ Username, Password string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if r.Method != http.MethodPost || body.Username != f.user || body.Password != f.pass {
+			http.Error(w, `{"status":"error","message":"invalid username or password"}`, http.StatusUnauthorized)
+			return
+		}
+		f.logins++
+		f.session = fmt.Sprintf("s%d", f.logins)
+		http.SetCookie(w, &http.Cookie{Name: "arrmada_session", Value: f.session, Path: "/"})
+		_, _ = w.Write([]byte(`{"user":{"username":"silo","role":"manager"}}`))
+		return
+	}
+	if ck, err := r.Cookie("arrmada_session"); err != nil || f.session == "" || ck.Value != f.session {
+		http.Error(w, `{"status":"error","message":"not signed in"}`, http.StatusUnauthorized)
 		return
 	}
 	switch {
@@ -92,6 +114,10 @@ func (f *fakeArrmada) add(kind string, id, item int64, event string) {
 	f.history[kind] = append([]historyEvent{{Kind: kind, ID: id, ItemID: item, Event: event}}, f.history[kind]...)
 }
 
+func (f *fakeArrmada) cred() Credential {
+	return Credential{Username: f.user, Password: f.pass}
+}
+
 func movie(paths ...string) map[string]any {
 	m := map[string]any{}
 	if len(paths) > 0 {
@@ -122,7 +148,7 @@ func poll(t *testing.T, f *fakeArrmada, m Marker, have bool) ([]Change, Marker) 
 	t.Helper()
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	changes, next, err := Poll(context.Background(), srv.URL+"/", f.key, m, have, srv.Client())
+	changes, next, err := Poll(context.Background(), srv.URL+"/", f.cred(), m, have, srv.Client())
 	if err != nil {
 		t.Fatalf("Poll: %v", err)
 	}
@@ -144,7 +170,7 @@ func TestFirstPollStartsAtNewestEventAndReportsNothing(t *testing.T) {
 		t.Fatalf("next = %+v", next)
 	}
 	for _, r := range f.requests {
-		if !strings.Contains(r, "limit=1") {
+		if !strings.Contains(r, "limit=1") && !strings.HasSuffix(r, "/auth/login") {
 			t.Errorf("first poll read more than the newest event: %s", r)
 		}
 	}
@@ -227,12 +253,12 @@ func TestPollKeepsMarkerOnError(t *testing.T) {
 	srv := httptest.NewServer(f)
 	defer srv.Close()
 	m := Marker{Movie: 1}
-	_, next, err := Poll(context.Background(), srv.URL, "wrong", m, true, srv.Client())
+	_, next, err := Poll(context.Background(), srv.URL+"/other", Credential{Username: "silo", Password: "wrong-pw"}, m, true, srv.Client())
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("err = %v, want a 401", err)
 	}
-	if strings.Contains(err.Error(), "wrong") {
-		t.Fatalf("error text carries the key: %v", err)
+	if strings.Contains(err.Error(), "wrong-pw") {
+		t.Fatalf("error text carries the password: %v", err)
 	}
 	if next != m {
 		t.Fatalf("next = %+v, want the old marker", next)
@@ -240,11 +266,12 @@ func TestPollKeepsMarkerOnError(t *testing.T) {
 }
 
 func TestPollNeedsAddressAndKey(t *testing.T) {
-	if _, _, err := Poll(context.Background(), "", "k", Marker{}, true, nil); err == nil {
+	if _, _, err := Poll(context.Background(), "", Credential{Username: "u", Password: "p"}, Marker{}, true, nil); err == nil {
 		t.Fatal("no address accepted")
 	}
-	if _, _, err := Poll(context.Background(), "http://x", " ", Marker{}, true, nil); err == nil {
-		t.Fatal("no key accepted")
+	_, _, err := Poll(context.Background(), "http://x", Credential{APIKey: "arrk_x"}, Marker{}, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "account") {
+		t.Fatalf("an API key was accepted for Autoscan: %v", err)
 	}
 }
 
@@ -318,6 +345,58 @@ func TestCommonDir(t *testing.T) {
 	for _, c := range cases {
 		if got := commonDir(c[0], c[1]); got != c[2] {
 			t.Errorf("commonDir(%q, %q) = %q, want %q", c[0], c[1], got, c[2])
+		}
+	}
+}
+
+func TestPollSignsInOnceAndAgainWhenTheSessionEnds(t *testing.T) {
+	f := newFake()
+	f.add(kindMovie, 2, 10, "imported")
+	f.movies[10] = movie("/m/a.mkv")
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	// A test of its own address, so no session is cached from other tests.
+	base := srv.URL + "/relogin"
+	f.mu.Lock()
+	f.session = ""
+	f.mu.Unlock()
+	poll := func() {
+		t.Helper()
+		if _, _, err := Poll(context.Background(), base, f.cred(), Marker{Movie: 1}, true, srv.Client()); err != nil {
+			t.Fatalf("Poll: %v", err)
+		}
+	}
+	poll()
+	poll()
+	if f.logins != 1 {
+		t.Fatalf("two polls signed in %d times, want 1", f.logins)
+	}
+	f.mu.Lock()
+	f.session = "signed-out"
+	f.mu.Unlock()
+	poll()
+	if f.logins != 2 {
+		t.Fatalf("after a sign-out: %d sign-ins, want 2", f.logins)
+	}
+}
+
+func TestParseCredential(t *testing.T) {
+	cases := []struct {
+		in   string
+		want Credential
+		ok   bool
+	}{
+		{"arrk_abc", Credential{APIKey: "arrk_abc"}, true},
+		{" silo:pa:ss ", Credential{Username: "silo", Password: "pa:ss"}, true},
+		{"silo:", Credential{}, false},
+		{":pw", Credential{}, false},
+		{"justakey", Credential{}, false},
+		{"", Credential{}, false},
+	}
+	for _, c := range cases {
+		got, err := ParseCredential(c.in)
+		if (err == nil) != c.ok || got != c.want {
+			t.Errorf("ParseCredential(%q) = %+v, %v", c.in, got, err)
 		}
 	}
 }

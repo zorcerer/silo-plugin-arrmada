@@ -10,12 +10,21 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadManifest: %v", err)
 	}
-	if m.GetPluginId() != "zorcerer.autoscan.arrmada" {
+	if m.GetPluginId() != "zorcerer.arrmada" {
 		t.Fatalf("plugin_id = %q", m.GetPluginId())
 	}
-	caps := m.GetCapabilities()
-	if len(caps) != 1 || caps[0].GetType() != "scan_source.v1" || caps[0].GetId() != "arrmada" {
-		t.Fatalf("capabilities = %+v", caps)
+	got := map[string]string{}
+	for _, c := range m.GetCapabilities() {
+		got[c.GetType()] = c.GetId()
+	}
+	want := map[string]string{"scan_source.v1": "autoscan", "request_router.v1": "requests"}
+	if len(got) != len(want) || got["scan_source.v1"] != want["scan_source.v1"] || got["request_router.v1"] != want["request_router.v1"] {
+		t.Fatalf("capabilities = %v, want %v", got, want)
+	}
+	for _, c := range m.GetCapabilities() {
+		if c.GetType() == "request_router.v1" && !c.GetRequestRouter().GetReportsDownloadProgress() {
+			t.Error("request router does not declare reports_download_progress")
+		}
 	}
 	if len(m.GetChecksum()) != 64 {
 		t.Fatalf("checksum = %q", m.GetChecksum())
@@ -39,7 +48,7 @@ func TestScanSourceDescriptor(t *testing.T) {
 	if err := json.Unmarshal(manifestJSON, &raw); err != nil {
 		t.Fatal(err)
 	}
-	d := raw.Capabilities[0].Metadata.ScanSource
+	d := raw.Capabilities[0].Metadata.ScanSource // the scan source is listed first
 	if d.Connection != "required" {
 		t.Errorf("connection = %q, want required", d.Connection)
 	}

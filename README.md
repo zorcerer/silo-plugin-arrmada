@@ -1,20 +1,85 @@
-# Arrmada Autoscan for Silo
+# Arrmada for Silo
 
-A [Silo](https://github.com/Silo-Server/silo-server) plugin that scans what
-[Arrmada](https://github.com/tristenlammi/Arrmada) changes. It implements
-Silo's `scan_source.v1` capability, the one the first-party
-[Sonarr and Radarr plugin](https://github.com/Silo-Server/silo-plugin-autoscan-arr)
-implements, against Arrmada's own API.
+A [Silo](https://github.com/Silo-Server/silo-server) plugin that connects it to
+[Arrmada](https://github.com/tristenlammi/Arrmada), with two capabilities:
 
-> **Draft.** Arrmada 0.x answers a personal API key with 403 on every route
-> outside its key allowlist (`internal/httpapi/apikey_routes.go`), and the
-> three routes below are not on it. Until they are, a poll fails with
-> "the API key's account is not a manager or admin (HTTP 403)".
+- **Requests** (`request_router.v1`): a movie or series requested in Silo
+  becomes a request in Arrmada, and Silo shows its progress.
+- **Autoscan** (`scan_source.v1`): what Arrmada imports, upgrades, renames or
+  deletes is scanned into Silo's library.
 
-## What it scans
+They take different credentials. Arrmada's personal API keys reach its
+requests routes but not its history or library, so Autoscan signs in with an
+account.
 
-Silo calls `PollChanges` on its Autoscan timer (600 seconds by default). The
-plugin then:
+## Requests
+
+### Setup
+
+1. In Arrmada, under Me, Personal API keys, create a key with **Full** access
+   for a manager or admin account.
+2. In Silo, add a request server for the **Arrmada** capability with Arrmada's
+   address (`http://arrmada:7878`, or wherever Silo reaches it) and the key.
+   Test connection says which account and role the key acts as.
+
+### What it does
+
+- **Fulfill** posts `POST /api/v1/requests` with the title's TMDB id (a show
+  is requested whole) and the note "Requested in Silo by <user>". When the
+  request comes back pending and **Approve requests** is on (the default), it
+  approves it with `POST /api/v1/requests/{id}/approve`. That needs a manager
+  or admin key with full access; with any other key the request waits in
+  Arrmada for staff, and Silo shows it as "Awaiting approval".
+- Arrmada keeps one request per title. Of the qualities Silo asks for, the
+  first HD one is sent with the **Quality profile** field. A 4K quality is sent,
+  with the **4K quality profile** field, only when **Send 4K requests** is on and
+  no HD quality was asked for. An empty profile is Arrmada's default.
+- **CheckStatus** reads `GET /api/v1/requests/{id}` and maps Arrmada's stage:
+
+  | Arrmada | Silo | Download phase |
+  |---|---|---|
+  | pending (not approved) | queued, "Awaiting approval" | |
+  | searching | queued | |
+  | queued, downloading, paused | downloading | the same |
+  | failed (Arrmada retries with another release) | downloading | stalled |
+  | importing, adding | downloading | importing |
+  | partial (some episodes) | downloading | |
+  | available | completed | |
+  | declined, or the request deleted in Arrmada | failed | |
+
+  While a download runs, Silo gets its size, what is left and the expected
+  finish, and checks every minute.
+- A title already in Arrmada's library is completed at once. A refusal from
+  Arrmada (a quota, a title it does not take) fails the target with Arrmada's
+  message.
+
+The quality profile is a text field: Arrmada's keys cannot list its profiles.
+
+## Autoscan
+
+### Setup
+
+1. In Arrmada, use a manager or admin account **without two-factor sign-in**.
+   A dedicated account (say `silo`) keeps its session apart from yours.
+2. In Silo, under Admin, Libraries, Autoscan, add a connection with Arrmada's
+   address, and `username:password` in the API key field (Silo stores it
+   encrypted). The value is split at the first colon, so the password may hold
+   one. Silo's form offers the Sonarr and Radarr types only; pick either, it is
+   a label. Test connection calls the Sonarr API and fails against Arrmada.
+3. Add a source, choose **Arrmada**, and bind the connection.
+4. When Arrmada and Silo mount the media at different paths (Arrmada's
+   `/media/movies` is Silo's `/data/movies`, say), add a path rewrite on the
+   source.
+
+The plugin signs in with `POST /api/v1/auth/login` and keeps the
+`arrmada_session` cookie in memory for the life of the plugin process, so the
+account's device list holds one session per process. When Arrmada answers 401
+it signs in once more. An account with two-factor sign-in fails with a message
+saying so.
+
+### What it scans
+
+On each poll (600 seconds by default) the plugin:
 
 1. Reads `GET /api/v1/history?kind=movie` and `?kind=series`, filtered to the
    `imported`, `upgraded`, `renamed` and `deleted` categories, newest first,
@@ -39,7 +104,7 @@ path left to report. Silo's next full scan of the library marks it missing.
 
 Books, audiobooks and music are not read yet.
 
-## Marker
+### Marker
 
 The marker is `v1;m=<movie event id>;s=<series event id>`: the newest event of
 each kind already reported. Arrmada's event ids only grow, so the plugin never
@@ -48,34 +113,18 @@ nothing. A marker the plugin cannot read, or ids lower than the marker (an
 Arrmada database restored from a backup), restart from the newest event in the
 same way.
 
-## Setup
-
-1. In Arrmada, under Me, Personal API keys, create a key for a manager or
-   admin account. A read-only key is enough: the plugin only sends `GET`.
-2. In Silo, under Admin, Plugins, upload the binary for the server's platform.
-3. Under Admin, Libraries, Autoscan, add a connection with Arrmada's address
-   (`http://arrmada:7878`, or wherever Silo reaches it) and the key. Silo's
-   form offers the Sonarr and Radarr types only; pick either, it is a label.
-   Test connection calls the Sonarr API and fails against Arrmada.
-4. Add a source, choose **Arrmada**, and bind the connection.
-5. When Arrmada and Silo mount the media at different paths (Arrmada's
-   `/media/movies` is Silo's `/data/movies`, say), add a path rewrite on the
-   source.
-
-The plugin stores nothing. The address and key arrive with each poll, and the
-key is sent in the `X-Api-Key` header; Arrmada refuses a key in the address.
-
 ## Building
 
 ```sh
 make build        # ./plugin for this platform
 make build-all    # dist/plugin-<os>-<arch> for linux/amd64, linux/arm64, darwin/arm64
 make test         # unit tests
-make e2e          # builds the binary and polls it over go-plugin gRPC, as Silo does
+make e2e          # builds the binary and calls it over go-plugin gRPC, as Silo does
 ./plugin manifest # the manifest Silo reads from the binary
 ```
 
-The version in the manifest comes from `git describe`, or `VERSION=1.2.3 make build`.
+Upload the binary for the Silo server's platform under Admin, Plugins. The
+version in the manifest comes from `git describe`, or `VERSION=1.2.3 make build`.
 
 ## License
 
