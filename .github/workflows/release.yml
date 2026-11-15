@@ -1,52 +1,46 @@
-# A pushed tag `v1.2.3` builds the plugin with 1.2.3 in its manifest and
-# publishes a release of that name with:
+# A release is a merged pull request that sets manifest.json "version", then a
+# maintainer pushes the matching v<version> tag on the commit that change put
+# on main. CONTRIBUTING.md#release has the steps.
 #
-# - plugin-<os>-<arch>, one binary per platform
-# - checksums.txt, their SHA-256 sums
-# - plugin.sigstore.json, a build provenance attestation of the binaries,
-#   which Silo checks and records for a plugin installed from a repository
-# - index.json, the Silo plugin repository index naming this release
+# The release job is Silo's shared plugin release workflow. It refuses a tag
+# that is not v<semver>, not on main's first-parent history, or that disagrees
+# with manifest.json, and publishes plugin-<os>-<arch>, checksums.txt and
+# plugin.sigstore.json (build provenance signed by that workflow). It notifies
+# the community catalog only when SILO_PLUGINS_DISPATCH_TOKEN is set.
 #
-# Silo's repository URL is
-# https://github.com/zorcerer/silo-plugin-arrmada/releases/latest/download/index.json
+# The index job then attaches index.json, the Silo plugin repository index,
+# so the plugin also installs from
+# https://github.com/<this repository>/releases/latest/download/index.json
 name: release
 
 on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - id: version
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: version
-    uses: ./.github/workflows/build.yml
-    with:
-      version: ${{ needs.version.outputs.version }}
-
-  publish:
-    needs: [version, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  release:
     permissions:
       contents: write
       id-token: write
       attestations: write
+    # Always @main: Silo servers pin the signer to plugin-release.yml@refs/heads/main.
+    uses: Silo-Server/.github/.github/workflows/plugin-release.yml@main
+    with:
+      catalog_repository: Silo-Community/silo-plugins
+    secrets:
+      dispatch_token: ${{ secrets.SILO_PLUGINS_DISPATCH_TOKEN }}
+
+  index:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -56,29 +50,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: plugin
-          path: dist
-
-      - name: Checksums
-        working-directory: dist
-        run: sha256sum plugin-* > checksums.txt && cat checksums.txt
-
-      - id: attest
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: dist/plugin-*
-
+      # The index names the published binaries by their SHA-256, so it is
+      # written from what the release holds, after checksums.txt agrees.
       - name: Index
         run: |
-          cp "${{ steps.attest.outputs.bundle-path }}" dist/plugin.sigstore.json
-          go run ./cmd/index -version "$VERSION" -dist dist -bundle > dist/index.json
-          jq -e '.plugins[0].manifest.version == env.VERSION' dist/index.json
-
-      - name: Create the release
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/plugin-* dist/checksums.txt dist/plugin.sigstore.json dist/index.json \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir dist --pattern 'plugin-*' --pattern checksums.txt
+          (cd dist && sha256sum --check --strict checksums.txt)
+          go run ./cmd/index -repo "$GITHUB_REPOSITORY" -version "${TAG#v}" -dist dist -bundle > index.json
+          jq -e --arg v "${TAG#v}" '.plugins[0].manifest.version == $v' index.json
+          gh release upload "$TAG" index.json --repo "$GITHUB_REPOSITORY"
