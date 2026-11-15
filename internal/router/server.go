@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -113,6 +114,9 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 		Year:           int(d.GetYear()),
 		QualityProfile: profile,
 	}
+	if mediaType == "series" {
+		in.Seasons = requestedSeasons(d.GetSeasons())
+	}
 	if who := d.GetRequesterUsername(); who != "" {
 		in.Note = "Requested in Silo by " + who
 	}
@@ -148,6 +152,24 @@ func (s *Server) Fulfill(ctx context.Context, req *pluginv1.FulfillRequest) (*pl
 	st := statusOf(created)
 	target.Status, target.ExternalStatus, target.Message, target.Wording = st.Status, st.ExternalStatus, st.Message, st.Wording
 	return &pluginv1.FulfillResponse{Targets: []*pluginv1.FulfillmentTarget{target}}, nil
+}
+
+// requestedSeasons is the seasons Silo asked for, sorted and without
+// repeats; nil is the whole show. Arrmada leaves out specials (season 0) and
+// seasons its catalogue does not list, requests only the seasons no other
+// request or the library covers, and follows the existing request when every
+// season is covered, so asking again converges.
+func requestedSeasons(in []int32) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, n := range in {
+		if n >= 0 && !seen[int(n)] {
+			seen[int(n)] = true
+			out = append(out, int(n))
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // pickQuality returns the quality to send and its Arrmada profile, or nil.

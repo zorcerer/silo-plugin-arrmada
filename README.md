@@ -41,8 +41,13 @@ server's platform from a release.
 
 ### What it does
 
-- **Fulfill** posts `POST /api/v1/requests` with the title's TMDB id (a show
-  is requested whole) and the note "Requested in Silo by <user>". When the
+- **Fulfill** posts `POST /api/v1/requests` with the title's TMDB id, a
+  show's seasons as Silo asked for them, and the note "Requested in Silo by
+  <user>". The plugin declares `supports_seasons`, so Silo sends the season
+  list, and for a show it already has, only the seasons it is missing.
+  Arrmada leaves out specials and seasons its catalogue does not list,
+  requests only the seasons no other request or the library covers, and
+  follows the existing request when all of them are covered. When the
   request comes back pending and **Approve requests** is on (the default), it
   approves it with `POST /api/v1/requests/{id}/approve`. That needs a manager
   or admin key with full access; with any other key the request waits in

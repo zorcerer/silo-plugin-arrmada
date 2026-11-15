@@ -52,6 +52,7 @@
       "display_name": "Arrmada",
       "description": "Creates Arrmada requests for Silo's movie and series requests and reports their progress.",
       "request_router": {
+        "supports_seasons": true,
         "reports_download_progress": true,
         "wording": {
           "step": "Arrmada",
