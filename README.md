@@ -41,12 +41,13 @@ On Silo `build-2249` with Arrmada 0.4.0, the maintainer has tested:
 - Requests, with plugin v0.1.1: the request server's connection test, and
   creating requests from Silo, a series among them.
 - Autoscan, with a v0.2 release: signing in with an email and password
-  account, and the source polling without errors.
+  account, and a title Arrmada imported being scanned into Silo's library
+  through the source's path rewrite (`/storage` to `/mnt/user/data`).
 
 Everything else (season-scoped requests from v0.2.0, approval, 4K, download
-progress, the error messages, and an import in Arrmada reaching Silo's
-library) has so far been run only by the test suite, against stand-ins for
-Silo and Arrmada built from their source.
+progress, the error messages, and the v0.2.2 changes) has so far been run
+only by the test suite, against stand-ins for Silo and Arrmada built from
+their source.
 
 A Silo server running in Docker reaches Arrmada by its container name on a
 shared Docker network (`http://Arrmada:7878`). A reverse proxy in front of
