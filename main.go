@@ -1,10 +1,15 @@
-// Command silo-plugin-autoscan-arrmada is a Silo scan_source.v1 plugin for
-// Arrmada. On each poll it reads Arrmada's movie and series history, looks up
-// the files of every title that changed, and returns those paths as Arrmada
-// sees them. Silo applies the source's path rewrites and queues the scans.
+// Command silo-plugin-arrmada connects Silo to Arrmada with two capabilities.
 //
-// The Arrmada address and API key arrive with every poll in
-// PollChangesRequest.connection; the plugin stores neither.
+// request_router.v1 sends Silo's movie and series requests to Arrmada's own
+// requests and reports their progress (internal/router).
+//
+// scan_source.v1 reads Arrmada's movie and series history on each poll, looks
+// up the files of every title that changed, and returns those paths as
+// Arrmada sees them. Silo applies the source's path rewrites and queues the
+// scans.
+//
+// The address and credential arrive with every call; the plugin stores
+// neither.
 package main
 
 import (
@@ -19,7 +24,8 @@ import (
 	publicmanifest "github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/manifest"
 	"github.com/Silo-Server/silo-plugin-sdk/pkg/pluginsdk/runtime"
 
-	"github.com/zorcerer/silo-plugin-autoscan-arrmada/internal/arrmada"
+	"github.com/zorcerer/silo-plugin-arrmada/internal/arrmada"
+	"github.com/zorcerer/silo-plugin-arrmada/internal/router"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -58,7 +64,11 @@ func (s *scanSourceServer) PollChanges(ctx context.Context, req *pluginv1.PollCh
 		// current position, as on a first poll.
 		haveMarker = false
 	}
-	changes, next, err := arrmada.Poll(ctx, conn.GetBaseUrl(), conn.GetApiKey(), marker, haveMarker, nil)
+	cred, err := arrmada.ParseCredential(conn.GetApiKey())
+	if err != nil {
+		return nil, err
+	}
+	changes, next, err := arrmada.Poll(ctx, conn.GetBaseUrl(), cred, marker, haveMarker, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +90,9 @@ func main() {
 	}
 	runtime.Serve(runtime.ServeConfig{
 		Servers: runtime.CapabilityServers{
-			Runtime:    &runtimeServer{manifest: manifest},
-			ScanSource: &scanSourceServer{},
+			Runtime:       &runtimeServer{manifest: manifest},
+			ScanSource:    &scanSourceServer{},
+			RequestRouter: router.New(),
 		},
 	})
 }

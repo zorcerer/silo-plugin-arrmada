@@ -1,39 +1,116 @@
 {
-  "plugin_id": "zorcerer.autoscan.arrmada",
+  "plugin_id": "zorcerer.arrmada",
   "version": "0.1.0",
   "checksum": "__CHECKSUM__",
   "silo_api_version": "v1",
   "presentation": {
-    "display_name": "Arrmada Autoscan",
-    "summary": "Scan the movie and show folders Arrmada imports to, renames or deletes from.",
-    "description_markdown": "Reads Arrmada's history for imports, upgrades, renames and deletions of movies and TV. For a movie it returns each of its files; for a show it returns the show's folder. Silo applies the source's path rewrites and scans those places only.",
-    "setup_markdown": "Create a personal API key in Arrmada for a manager or admin account. In Silo, add an Autoscan connection with Arrmada's address (for example `http://arrmada:7878`) and that key; the connection type can be Sonarr or Radarr, which only labels it. Then add an Arrmada Autoscan source with that connection, and a path rewrite when Arrmada and Silo mount the media at different paths. Test connection calls the Sonarr API and fails against Arrmada.",
-    "homepage_url": "https://github.com/zorcerer/silo-plugin-autoscan-arrmada",
-    "source_url": "https://github.com/zorcerer/silo-plugin-autoscan-arrmada",
-    "support_url": "https://github.com/zorcerer/silo-plugin-autoscan-arrmada/issues",
-    "changelog_url": "https://github.com/zorcerer/silo-plugin-autoscan-arrmada/releases",
+    "display_name": "Arrmada",
+    "summary": "Send Silo's movie and series requests to Arrmada, and scan what Arrmada imports, renames or deletes.",
+    "description_markdown": "Two capabilities. **Requests** creates an Arrmada request for each Silo movie or series request, approves it when the key may, and reports its progress back to Silo. **Autoscan** reads Arrmada's history for imports, upgrades, renames and deletions of movies and TV, and returns each changed movie's files and each changed show's folder for Silo to scan.",
+    "setup_markdown": "**Requests:** in Arrmada, under Me, Personal API keys, create a key with full access for a manager or admin account. In Silo, add an Arrmada request server with Arrmada's address and that key.\n\n**Autoscan:** Arrmada's API keys cannot read its history, so Autoscan signs in with an account. Use a manager or admin account without two-factor sign-in, and put `username:password` in the Autoscan connection's API key field (Silo stores it encrypted). The connection type can be Sonarr or Radarr, which only labels it; Test connection calls the Sonarr API and fails against Arrmada. Then add an Arrmada Autoscan source with that connection, and a path rewrite when Arrmada and Silo mount the media at different paths.",
+    "homepage_url": "https://github.com/zorcerer/silo-plugin-arrmada",
+    "source_url": "https://github.com/zorcerer/silo-plugin-arrmada",
+    "support_url": "https://github.com/zorcerer/silo-plugin-arrmada/issues",
+    "changelog_url": "https://github.com/zorcerer/silo-plugin-arrmada/releases",
     "publisher_name": "zorcerer",
     "publisher_url": "https://github.com/zorcerer",
     "license_spdx": "MIT"
   },
   "supported_platforms": [
-    { "os": "linux", "arch": "amd64" },
-    { "os": "linux", "arch": "arm64" },
-    { "os": "darwin", "arch": "arm64" }
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    },
+    {
+      "os": "darwin",
+      "arch": "arm64"
+    }
   ],
   "capabilities": [
     {
       "type": "scan_source.v1",
-      "id": "arrmada",
+      "id": "autoscan",
       "display_name": "Arrmada",
       "description": "Scans what Arrmada imported, upgraded, renamed or deleted.",
       "metadata": {
         "scan_source": {
-          "summary": "Scans the movie and show folders Arrmada changes, read from its history.",
-          "delivery_modes": ["poll"],
+          "summary": "Scans the movie and show folders Arrmada changes, read from its history. Signs in with an account.",
+          "delivery_modes": [
+            "poll"
+          ],
           "connection": "required"
         }
       }
+    },
+    {
+      "type": "request_router.v1",
+      "id": "requests",
+      "display_name": "Arrmada",
+      "description": "Creates Arrmada requests for Silo's movie and series requests and reports their progress.",
+      "request_router": {
+        "reports_download_progress": true,
+        "wording": {
+          "step": "Arrmada",
+          "queued": {
+            "label": "Searching",
+            "detail": "Arrmada is looking for a release."
+          },
+          "downloading": {
+            "label": "Downloading",
+            "detail": "Arrmada is downloading it."
+          }
+        }
+      },
+      "config_schema": [
+        {
+          "key": "connection",
+          "title": "Arrmada",
+          "json_schema": "{\"type\":\"object\",\"properties\":{\"approve\":{\"type\":\"boolean\"},\"quality_profile\":{\"type\":\"string\"},\"supports_4k\":{\"type\":\"boolean\"},\"quality_profile_4k\":{\"type\":\"string\"}}}",
+          "admin_form": {
+            "submit_label": "Save connection",
+            "fields": [
+              {
+                "key": "approve",
+                "label": "Approve requests",
+                "control": "ADMIN_FORM_CONTROL_SWITCH",
+                "default_value": true,
+                "description": "Approve each request in Arrmada as it is made. Needs a manager or admin key with full access; otherwise requests wait for staff in Arrmada."
+              },
+              {
+                "key": "quality_profile",
+                "label": "Quality profile",
+                "control": "ADMIN_FORM_CONTROL_TEXT",
+                "description": "The key of an Arrmada quality profile for HD requests. Empty uses Arrmada's default."
+              },
+              {
+                "key": "supports_4k",
+                "label": "Send 4K requests",
+                "control": "ADMIN_FORM_CONTROL_SWITCH",
+                "default_value": false,
+                "description": "Arrmada keeps one request per title, so a 4K request is sent only when no HD quality was asked for."
+              },
+              {
+                "key": "quality_profile_4k",
+                "label": "4K quality profile",
+                "control": "ADMIN_FORM_CONTROL_TEXT",
+                "description": "The key of an Arrmada quality profile for 4K requests.",
+                "show_when": [
+                  {
+                    "field": "supports_4k",
+                    "equals": [
+                      "true"
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
     }
   ],
   "global_config_schema": []
