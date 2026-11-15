@@ -363,3 +363,54 @@ func mustRequest(t *testing.T, raw string) (r arrmada.Request) {
 	}
 	return r
 }
+
+func seriesRequest(seasons ...int32) *pluginv1.FulfillRequest {
+	return &pluginv1.FulfillRequest{
+		CapabilityId: "requests",
+		Request: &pluginv1.RequestDescriptor{
+			MediaType:   "series",
+			Title:       "Severance",
+			Year:        2022,
+			ExternalIds: map[string]string{"tmdb": "95396"},
+			Seasons:     seasons,
+		},
+		Qualities: []*pluginv1.RequestedQuality{hd},
+	}
+}
+
+func TestFulfillSendsOnlyTheRequestedSeasons(t *testing.T) {
+	cases := []struct {
+		name    string
+		seasons []int32
+		want    any // the body's "seasons": absent for the whole show
+	}{
+		{"two seasons, out of order and repeated", []int32{3, 2, 3}, []any{float64(2), float64(3)}},
+		{"specials are passed on for Arrmada to drop", []int32{0, 1}, []any{float64(0), float64(1)}},
+		{"no seasons is the whole show", nil, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFake()
+			fulfill(t, f, map[string]any{}, seriesRequest(c.seasons...))
+			got, ok := f.created[0]["seasons"]
+			if c.want == nil {
+				if ok {
+					t.Fatalf("seasons = %v, want none (the whole show)", got)
+				}
+				return
+			}
+			if fmt.Sprint(got) != fmt.Sprint(c.want) {
+				t.Fatalf("seasons = %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	// A movie never carries seasons, whatever the descriptor says.
+	f := newFake()
+	req := movieRequest(hd)
+	req.Request.Seasons = []int32{1}
+	fulfill(t, f, map[string]any{}, req)
+	if _, ok := f.created[0]["seasons"]; ok {
+		t.Fatalf("a movie request carried seasons: %v", f.created[0])
+	}
+}

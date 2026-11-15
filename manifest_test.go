@@ -25,6 +25,10 @@ func TestEmbeddedManifestLoads(t *testing.T) {
 		if c.GetType() == "request_router.v1" && !c.GetRequestRouter().GetReportsDownloadProgress() {
 			t.Error("request router does not declare reports_download_progress")
 		}
+		// Without it Silo sends no season list and asks for whole shows.
+		if c.GetType() == "request_router.v1" && !c.GetRequestRouter().GetSupportsSeasons() {
+			t.Error("request router does not declare supports_seasons")
+		}
 	}
 	if len(m.GetChecksum()) != 64 {
 		t.Fatalf("checksum = %q", m.GetChecksum())
