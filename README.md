@@ -257,7 +257,7 @@ how to verify a downloaded binary.
 ## AI disclosure
 
 - Harness: Claude Code 2.1.311
-- Tool(s): Claude Code CLI
+- Tool(s): Claude Code CLI; govulncheck v1.9.0 for the dependency scan
 - Model(s): `claude-opus-5-5`, as the session reports it; all of the
   plugin's code was written in that one session
 - Involvement: Fully AI-generated, human verified. The maintainer (zorcerer)
@@ -270,8 +270,15 @@ how to verify a downloaded binary.
   failures as permanent, Autoscan polls that could time out on the same
   window forever, event names it missed, credentials that would follow a
   redirect to another host, and other services' response bodies shown in
-  error messages. The fixes are in v0.2.2. Not fixed: deleted files leave no
-  path to report (see Autoscan above).
+  error messages. Then a security review by the model, covering what the
+  plugin exposes, credential handling, the address an admin enters, size
+  limits, TLS, injection, the paths reported to Silo and the workflows,
+  with govulncheck. It found nothing exposed (no routes or ports, only the
+  Unix socket to Silo), but releases built with Go 1.26.0 and
+  golang.org/x/net 0.58.0, both with known vulnerabilities reachable from
+  the plugin, and an address holding user:password repeated in errors. The
+  fixes are in v0.2.2, built with Go 1.26.11; govulncheck now runs in CI.
+  Not fixed: deleted files leave no path to report (see Autoscan above).
 
 Pull requests from #11 on end with the same disclosure for their own changes;
 `.github/PULL_REQUEST_TEMPLATE.md` carries the fields.
